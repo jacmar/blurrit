@@ -28,23 +28,29 @@ if uploaded_files:
             seed = None
     
     # Parametri personalizzati per modalità standard e refine
-    if mode in ["standard", "refine"]:
-        st.subheader("Parametri personalizzati")
-        
-        focus_ratio = st.slider("Focus Ratio", 0.1, 0.9, 0.3, 0.05)
-        blur_strength = st.slider("Blur Strength", 0.1, 1.0, 0.7, 0.05)
-        randomness = st.slider("Randomness", 0.0, 1.0, 0.5, 0.05)
-        ghost_threshold = st.slider("Ghost Threshold", 0.0, 1.0, 0.5, 0.05)
-        
-        params = {
-            "focus_ratio": focus_ratio,
-            "blur_strength": blur_strength,
-            "randomness": randomness,
-            "ghost_threshold": ghost_threshold
-        }
-    else:
-        params = {}
+  if mode in ["standard", "refine"]:
+    st.subheader("Parametri personalizzati")
     
+    focus_ratio = st.slider("Focus Ratio", 0.1, 0.9, 0.3, 0.05)
+    blur_strength = st.slider("Blur Strength", 0.1, 1.0, 0.7, 0.05)
+    randomness = st.slider("Randomness", 0.0, 1.0, 0.5, 0.05)
+    ghost_threshold = st.slider("Ghost Threshold", 0.0, 1.0, 0.5, 0.05)
+    
+    params = {
+        "focus_ratio": float(focus_ratio),
+        "blur_strength": float(blur_strength),
+        "randomness": float(randomness),
+        "ghost_threshold": float(ghost_threshold)
+    }
+else:
+    # Per le altre modalità usa i valori predefiniti
+    params = {
+        "focus_ratio": 0.3,
+        "blur_strength": 0.7,
+        "randomness": 0.5,
+        "ghost_threshold": 0.5
+    }
+
     if st.button("Elabora Immagini"):
         with tempfile.TemporaryDirectory() as input_dir, tempfile.TemporaryDirectory() as output_dir:
             # Salva le immagini caricate nella directory temporanea
@@ -69,3 +75,4 @@ if uploaded_files:
                         mime="image/jpeg"
                     )
                 st.image(output_file, caption=f"Risultato {i+1}")
+
