@@ -71,7 +71,9 @@ def process_images(input_folder, output_folder, focus_ratio=0.3, blur_strength=0
     focus_mask = np.zeros((h, w), dtype=np.float32)
     
     # Aggiungi regioni casuali a fuoco
-    num_regions = 2 + int(randomness * 5)
+    if randomness is None:
+    randomness = 0.5  # valore predefinito
+num_regions = 2 + int(float(randomness) * 5)
     for _ in range(num_regions):
         cx = random.randint(0, w-1)
         cy = random.randint(0, h-1)
