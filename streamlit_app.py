@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw, ImageChops
 import io
 import base64
+import traceback
 from datetime import datetime
 
 # Set page configuration
@@ -15,10 +16,107 @@ st.set_page_config(
     layout="wide"
 )
 
-# Define the main processing function that will replace selective_focus_basic.py
-def selective_focus(img, mode, seed=None, params=None):
+def apply_effect(img, params, seed):
+    """Apply the selective focus effect to a single image"""
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    # Assicurati che l'immagine sia in RGB o RGBA
+    if img.mode not in ('RGB', 'RGBA'):
+        img = img.convert('RGB')
+    
+    # Extract parameters
+    focus_ratio = params["focus_ratio"]  # 0.1-0.9
+    blur_strength = params["blur_strength"]  # 0.1-1.0
+    randomness = params["randomness"]  # 0.0-1.0
+    ghost_threshold = params["ghost_threshold"]  # 0.0-1.0
+    
+    # Create a blurred copy of the image
+    blur_radius = int(20 * blur_strength)
+    blurred = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    
+    # Create a mask for selective focus
+    width, height = img.size
+    mask = Image.new('L', (width, height), 0)
+    
+    # Center of the image
+    center_x, center_y = width // 2, height // 2
+    
+    # Radius of the focused area, modified with focus_ratio
+    focus_size = min(width, height) * (1.0 - focus_ratio * 0.8)
+    
+    # Add randomness to the focus center if requested
+    if randomness > 0:
+        center_x += int(random.uniform(-width * 0.2, width * 0.2) * randomness)
+        center_y += int(random.uniform(-height * 0.2, height * 0.2) * randomness)
+    
+    # Create focus mask with gradual transition
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((center_x - focus_size/2, center_y - focus_size/2,
+                  center_x + focus_size/2, center_y + focus_size/2), fill=255)
+    
+    # Blur the mask edges for smooth transition
+    transition_blur = max(1, int(focus_size/12))  # Increased smoothness
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=transition_blur))
+    
+    # Apply randomness to the mask if requested
+    if randomness > 0:
+        mask_array = np.array(mask)
+        noise = np.random.normal(0, 20 * randomness, mask_array.shape)  # Reduced noise intensity
+        mask_array = np.clip(mask_array + noise, 0, 255).astype(np.uint8)
+        mask = Image.fromarray(mask_array)
+    
+    # Combine the original image and the blurred one using the mask
+    result = Image.composite(img, blurred, mask)
+    
+    # Apply "ghost" effect if threshold > 0
+    if ghost_threshold > 0:
+        # Usa il valore effettivo di ghost_threshold per evitare l'effetto "grigio"
+        result = apply_ghost_effect(result, mask, ghost_threshold)
+    
+    return result
+
+def apply_ghost_effect(img, mask, threshold):
+    """Apply a creative 'ghost' effect to out-of-focus areas"""
+    # Salva il formato originale dell'immagine
+    original_mode = img.mode
+    # Converti in RGBA per il processamento
+    img = img.convert('RGBA')
+    width, height = img.size
+    result = img.copy()
+    pixels = result.load()
+    mask_pixels = mask.load()
+    
+    for y in range(height):
+        for x in range(width):
+            r, g, b, a = pixels[x, y]
+            mask_value = mask_pixels[x, y]
+            
+            # If we're outside the focus area based on threshold
+            if mask_value < 255 * threshold:
+                # Partial desaturation effect
+                gray = (r + g + b) // 3
+                factor = 0.7  # Effect intensity
+                
+                # Mix between original color and gray
+                r = int(r * (1 - factor) + gray * factor)
+                g = int(g * (1 - factor) + gray * factor)
+                b = int(b * (1 - factor) + gray * factor)
+                
+                # Now we use more natural effect - only slight blue tint
+                b = min(255, int(b * 1.05))  # Reduced from 1.1 to 1.05
+                
+                pixels[x, y] = (r, g, b, a)
+    
+    # Se l'immagine originale era in RGB, riconverti per evitare problemi
+    if original_mode == 'RGB':
+        result = result.convert('RGB')
+    
+    return result
+
+def process_image(img, mode, seed=None, params=None):
     """
-    Apply selective focus effect to an image.
+    Process a single image with selective focus effect.
     
     Parameters:
     img (PIL.Image): Input image
@@ -78,102 +176,25 @@ def selective_focus(img, mode, seed=None, params=None):
         ]
         
         for preset in presets:
-            result = apply_effect(img, preset, seed)
+            # Merge with default parameters
+            params_copy = default_params.copy()
+            for key, value in preset.items():
+                params_copy[key] = value
+                
+            result = apply_effect(img, params_copy, seed)
             results.append(result)
     
     return results
 
-def apply_effect(img, params, seed):
-    """Apply the selective focus effect to a single image"""
-    random.seed(seed)
-    np.random.seed(seed)
-    
-    # Extract parameters
-    focus_ratio = params["focus_ratio"]  # 0.1-0.9
-    blur_strength = params["blur_strength"]  # 0.1-1.0
-    randomness = params["randomness"]  # 0.0-1.0
-    ghost_threshold = params["ghost_threshold"]  # 0.0-1.0
-    
-    # Create a blurred copy of the image
-    blur_radius = int(20 * blur_strength)
-    blurred = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-    
-    # Create a mask for selective focus
-    width, height = img.size
-    mask = Image.new('L', (width, height), 0)
-    
-    # Center of the image
-    center_x, center_y = width // 2, height // 2
-    
-    # Radius of the focused area, modified with focus_ratio
-    focus_size = min(width, height) * (1.0 - focus_ratio * 0.8)
-    
-    # Add randomness to the focus center if requested
-    if randomness > 0:
-        center_x += int(random.uniform(-width * 0.2, width * 0.2) * randomness)
-        center_y += int(random.uniform(-height * 0.2, height * 0.2) * randomness)
-    
-    # Create focus mask with gradual transition
-    draw = ImageDraw.Draw(mask)
-    draw.ellipse((center_x - focus_size/2, center_y - focus_size/2,
-                  center_x + focus_size/2, center_y + focus_size/2), fill=255)
-    
-    # Blur the mask edges for smooth transition
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=focus_size/10))
-    
-    # Apply randomness to the mask if requested
-    if randomness > 0:
-        mask_array = np.array(mask)
-        noise = np.random.normal(0, 30 * randomness, mask_array.shape)
-        mask_array = np.clip(mask_array + noise, 0, 255).astype(np.uint8)
-        mask = Image.fromarray(mask_array)
-    
-    # Combine the original image and the blurred one using the mask
-    result = Image.composite(img, blurred, mask)
-    
-    # Apply "ghost" effect if threshold > 0
-    if ghost_threshold > 0:
-        result = apply_ghost_effect(result, mask, ghost_threshold)
-    
-    return result
-
-def apply_ghost_effect(img, mask, threshold):
-    """Apply a creative 'ghost' effect to out-of-focus areas"""
-    img = img.convert('RGBA')
-    width, height = img.size
-    result = img.copy()
-    pixels = result.load()
-    mask_pixels = mask.load()
-    
-    for y in range(height):
-        for x in range(width):
-            r, g, b, a = pixels[x, y]
-            mask_value = mask_pixels[x, y]
-            
-            # If we're outside the focus area based on threshold
-            if mask_value < 255 * threshold:
-                # Partial desaturation effect
-                gray = (r + g + b) // 3
-                factor = 0.7  # Effect intensity
-                
-                # Mix between original color and gray
-                r = int(r * (1 - factor) + gray * factor)
-                g = int(g * (1 - factor) + gray * factor)
-                b = int(b * (1 - factor) + gray * factor)
-                
-                # Add slight blue/cold tint for ethereal effect
-                b = min(255, int(b * 1.1))
-                
-                pixels[x, y] = (r, g, b, a)
-    
-    return result
-
 def get_image_download_link(img, filename, text):
     """Generate a download link for an image"""
     buffered = io.BytesIO()
+    # Converti l'immagine in RGB se è in modalità RGBA per evitare errori JPEG
+    if img.mode == 'RGBA':
+        img = img.convert('RGB')
     img.save(buffered, format="JPEG", quality=90)
     img_str = base64.b64encode(buffered.getvalue()).decode()
-    href = f'<a href="data:file/jpg;base64,{img_str}" download="{filename}">{text}</a>'
+    href = f'<a href="data:file/jpg;base64,{img_str}" download="{filename}" style="text-decoration:none;">{text}</a>'
     return href
 
 # Main Streamlit app
@@ -266,9 +287,15 @@ def main():
                 img = Image.open(uploaded_file)
                 status_text.text(f"Elaborazione di {uploaded_file.name}...")
                 
-                # Process the image
-                results = selective_focus(img, mode_key, seed, params)
-                all_results.append((uploaded_file.name, results))
+                try:
+                    # Process the image - note changed function name here
+                    results = process_image(img, mode_key, seed, params)
+                    all_results.append((uploaded_file.name, results))
+                except Exception as e:
+                    st.error(f"Errore durante l'elaborazione: {str(e)}")
+                    st.error(f"Tipo di errore: {type(e).__name__}")
+                    st.error(f"Traceback: {traceback.format_exc()}")
+                    break
                 
                 # Update progress
                 progress_bar.progress((i + 1) / len(uploaded_files))
@@ -278,39 +305,46 @@ def main():
             status_text.empty()
             
             # Display results
-            st.subheader("Immagini elaborate")
-            
-            # Calculate how many columns to display based on the mode
-            if mode_key == "standard" or mode_key == "refine":
-                num_cols = 1
-            elif mode_key == "explore":
-                num_cols = 2
-            else:  # sample
-                num_cols = 3
-            
-            # For each processed image
-            for orig_name, results in all_results:
-                st.markdown(f"**Risultati per: {orig_name}**")
+            if all_results:
+                st.subheader("Immagini elaborate")
                 
-                # Create rows of results
-                for i in range(0, len(results), num_cols):
-                    cols = st.columns(num_cols)
+                # Calculate how many columns to display based on the mode
+                if mode_key == "standard" or mode_key == "refine":
+                    num_cols = 1
+                elif mode_key == "explore":
+                    num_cols = 2
+                else:  # sample
+                    num_cols = 3
+                
+                # For each processed image
+                for orig_name, results in all_results:
+                    st.markdown(f"**Risultati per: {orig_name}**")
                     
-                    for j in range(num_cols):
-                        if i + j < len(results):
-                            with cols[j]:
-                                result_img = results[i + j]
-                                st.image(result_img, use_column_width=True)
-                                
-                                # Create a unique filename
-                                base_name = os.path.splitext(orig_name)[0]
-                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                filename = f"{base_name}_effect_{i+j+1}_{timestamp}.jpg"
-                                
-                                # Provide download link
-                                st.markdown(get_image_download_link(result_img, filename, "📥 Scarica"), unsafe_allow_html=True)
-                
-                st.markdown("---")
+                    # Create rows of results
+                    for i in range(0, len(results), num_cols):
+                        cols = st.columns(num_cols)
+                        
+                        for j in range(num_cols):
+                            if i + j < len(results):
+                                with cols[j]:
+                                    result_img = results[i + j]
+                                    st.image(result_img, use_container_width=True)
+                                    
+                                                    # Create a unique filename
+                                    base_name = os.path.splitext(orig_name)[0]
+                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    effect_type = "standard" if mode_key == "standard" else \
+                                                 f"explore_{i+j+1}" if mode_key == "explore" else \
+                                                 f"sample_{i+j+1}" if mode_key == "sample" else \
+                                                 f"refine_{seed}"
+                                    filename = f"{base_name}_{effect_type}.jpg"
+                                    
+                                    # Provide download link
+                                    st.markdown(get_image_download_link(result_img, filename, "📥 Scarica"), unsafe_allow_html=True)
+                    
+                    st.markdown("---")
+            else:
+                st.warning("Nessun risultato generato a causa di errori.")
     else:
         # Show instructions when no images are uploaded
         st.info("👆 Carica una o più immagini dalla barra laterale per iniziare.")
