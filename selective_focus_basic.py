@@ -2,338 +2,237 @@
 # -*- coding: utf-8 -*-
 
 import os
-import cv2
-import numpy as np
+import glob
 import random
-import time
-import sys
+import numpy as np
+from PIL import Image, ImageFilter, ImageEnhance, ImageDraw, ImageChops
 import argparse
+import time
 
-def process_images(input_folder, output_folder, focus_ratio=0.3, blur_strength=0.7, randomness=0.5, ghost_threshold=0.5, seed=None, variant_name=None):
+def process_images(input_dir, output_dir, mode="standard", seed=None, **params):
     """
-    Elabora le immagini nella cartella di input e crea un'immagine con effetto di messa a fuoco selettiva.
+    Process images from input directory with selective focus effect.
+    
+    Parameters:
+    input_dir (str): Directory containing input images
+    output_dir (str): Directory for saving processed images
+    mode (str): Processing mode ('standard', 'explore', 'sample', 'refine')
+    seed (int, optional): Random seed for reproducibility
+    **params: Additional parameters for the effect
+    
+    Returns:
+    list: List of output image paths
     """
-    # Imposta il seed se fornito
-    if seed is not None:
-        random.seed(seed)
-        np.random.seed(seed)
+    # Make sure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Verifica che la cartella di input esista
-    if not os.path.exists(input_folder):
-        print(f"ERRORE: La directory di input '{input_folder}' non esiste.")
-        return None
+    # Set random seed
+    if seed is None:
+        seed = random.randint(1, 999999)
+    print(f"Using seed: {seed}")
+    random.seed(seed)
+    np.random.seed(seed)
     
-    # Crea la cartella di output se non esiste
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-        print(f"Creata directory di output: {output_folder}")
+    # Default parameters
+    default_params = {
+        "focus_ratio": 0.3,      # 0.1-0.9
+        "blur_strength": 0.7,    # 0.1-1.0
+        "randomness": 0.5,       # 0.0-1.0
+        "ghost_threshold": 0.5   # 0.0-1.0
+    }
     
-    # Trova le immagini nella cartella di input
+    # Merge with custom parameters if provided
+    for key, value in params.items():
+        if key in default_params:
+            default_params[key] = value
+    
+    # Find all image files
     image_files = []
-    for file in os.listdir(input_folder):
-        ext = os.path.splitext(file)[1].lower()
-        if ext in ['.jpg', '.jpeg', '.png', '.tiff', '.JPG', '.JPEG', '.PNG', '.TIFF']:
-            image_files.append(os.path.join(input_folder, file))
+    for ext in ['.jpg', '.jpeg', '.png', '.tiff', '.JPG', '.JPEG', '.PNG', '.TIFF']:
+        image_files.extend(glob.glob(os.path.join(input_dir, f"*{ext}")))
     
     if not image_files:
-        print(f"Nessuna immagine trovata in {input_folder}")
-        return None
+        print(f"No image files found in {input_dir}")
+        return []
     
-    print(f"Trovate {len(image_files)} immagini")
+    print(f"Found {len(image_files)} images to process")
+    output_files = []
     
-    # Carica le immagini
-    images = []
-    for path in image_files:
-        img = cv2.imread(path)
-        if img is not None:
-            images.append(img)
-            print(f"Caricata immagine: {os.path.basename(path)}")
-        else:
-            print(f"Impossibile caricare {path}")
-    
-    if not images:
-        print("Nessuna immagine caricata con successo")
-        return None
-    
-    # Assicurati che tutte le immagini abbiano le stesse dimensioni
-    if len(images) > 1:
-        target_h, target_w = images[0].shape[:2]
-        for i in range(1, len(images)):
-            h, w = images[i].shape[:2]
-            if h != target_h or w != target_w:
-                images[i] = cv2.resize(images[i], (target_w, target_h))
-                print(f"Ridimensionata immagine {i+1} a {target_w}x{target_h}")
-    
-    # Dimensioni dell'immagine
-    h, w = images[0].shape[:2]
-    
-    # Crea una mappa di messa a fuoco
-    focus_mask = np.zeros((h, w), dtype=np.float32)
-    
-    # Aggiungi regioni casuali a fuoco
-    if randomness is None:
-    randomness = 0.5  # valore predefinito
-num_regions = 2 + int(float(randomness) * 5)
-    for _ in range(num_regions):
-        cx = random.randint(0, w-1)
-        cy = random.randint(0, h-1)
-        radius = int(min(w, h) * (0.1 + random.random() * 0.2))
+    # Process each image
+    for img_path in image_files:
+        img_name = os.path.basename(img_path)
+        base_name, ext = os.path.splitext(img_name)
+        print(f"Processing {img_name}...")
         
-        y, x = np.mgrid[:h, :w]
-        dist = np.sqrt((x - cx)**2 + (y - cy)**2)
-        region = np.exp(-(dist**2) / (2 * radius**2))
-        focus_mask = np.maximum(focus_mask, region)
-    
-    # Aggiungi una regione centrale a fuoco
-    cx, cy = w // 2, h // 2
-    radius = int(min(w, h) * focus_ratio * 0.5)
-    y, x = np.mgrid[:h, :w]
-    dist = np.sqrt((x - cx)**2 + (y - cy)**2)
-    center_region = np.exp(-(dist**2) / (2 * radius**2))
-    focus_mask = np.maximum(focus_mask, center_region)
-    
-    # Normalizza la maschera
-    if np.max(focus_mask) > 0:
-        focus_mask = focus_mask / np.max(focus_mask)
-    
-    # Sfuma i bordi della maschera
-    kernel_size = int(21 * blur_strength)
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    kernel_size = max(3, min(kernel_size, 45))  # Limita tra 3 e 45
-    focus_mask = cv2.GaussianBlur(focus_mask, (kernel_size, kernel_size), 0)
-    
-    # Crea l'immagine risultato
-    result = np.zeros_like(images[0], dtype=np.float32)
-    
-    # Aggiungi l'immagine originale nelle aree a fuoco
-    result += focus_mask[:, :, np.newaxis] * images[0].astype(np.float32)
-    
-    # Pesi totali applicati
-    weights_sum = focus_mask.copy()
-    
-    # Applica le altre immagini nelle aree sfocate
-    if len(images) > 1:
-        for i in range(1, len(images)):
-            # Calcola differenze con l'immagine base
-            gray1 = cv2.cvtColor(images[0], cv2.COLOR_BGR2GRAY)
-            gray2 = cv2.cvtColor(images[i], cv2.COLOR_BGR2GRAY)
+        # Load the image
+        try:
+            img = Image.open(img_path)
+        except Exception as e:
+            print(f"Error loading {img_path}: {e}")
+            continue
+        
+        # Process according to mode
+        if mode == "standard" or mode == "refine":
+            # Generate a single image with the specified parameters
+            result = apply_effect(img, default_params, seed)
+            output_path = os.path.join(output_dir, f"{base_name}_effect{ext}")
+            result.save(output_path, quality=95)
+            output_files.append(output_path)
+            print(f"Saved to {output_path}")
             
-            diff = np.abs(gray1.astype(np.float32) - gray2.astype(np.float32))
-            max_diff = np.max(diff) if np.max(diff) > 0 else 1
-            diff_norm = diff / max_diff
-            
-            # Controlla l'effetto ghost con la soglia
-            ghost_mask = np.clip(1.0 - diff_norm + ghost_threshold, 0, 1)
-            
-            # Crea una maschera per questa immagine
-            img_mask = np.zeros((h, w), dtype=np.float32)
-            
-            # Aggiungi regioni casuali
-            num_areas = 2 + int(randomness * 3)
-            for _ in range(num_areas):
-                cx = random.randint(0, w-1)
-                cy = random.randint(0, h-1)
-                rx = int(min(w, h) * (0.1 + random.random() * 0.3))
-                ry = int(min(w, h) * (0.1 + random.random() * 0.3))
+        elif mode == "explore":
+            # Generate 4 variations with different seeds
+            for i in range(4):
+                current_seed = seed + i
+                result = apply_effect(img, default_params, current_seed)
+                output_path = os.path.join(output_dir, f"{base_name}_explore_{i+1}{ext}")
+                result.save(output_path, quality=95)
+                output_files.append(output_path)
+                print(f"Saved variation {i+1} to {output_path}")
                 
-                # Crea una forma ellittica
-                y, x = np.mgrid[:h, :w]
-                angle = random.random() * np.pi
-                x_rot = (x - cx) * np.cos(angle) + (y - cy) * np.sin(angle)
-                y_rot = -(x - cx) * np.sin(angle) + (y - cy) * np.cos(angle)
-                dist = (x_rot / rx)**2 + (y_rot / ry)**2
-                area = np.exp(-dist)
+        elif mode == "sample":
+            # Generate 6 artistic variations with the same seed
+            presets = [
+                {"focus_ratio": 0.2, "blur_strength": 0.5, "randomness": 0.3, "ghost_threshold": 0.4},
+                {"focus_ratio": 0.3, "blur_strength": 0.8, "randomness": 0.6, "ghost_threshold": 0.5},
+                {"focus_ratio": 0.4, "blur_strength": 0.9, "randomness": 0.4, "ghost_threshold": 0.6},
+                {"focus_ratio": 0.5, "blur_strength": 0.7, "randomness": 0.7, "ghost_threshold": 0.3},
+                {"focus_ratio": 0.6, "blur_strength": 0.6, "randomness": 0.5, "ghost_threshold": 0.4},
+                {"focus_ratio": 0.7, "blur_strength": 0.5, "randomness": 0.8, "ghost_threshold": 0.2}
+            ]
+            
+            for i, preset in enumerate(presets):
+                # Merge with default parameters
+                params_copy = default_params.copy()
+                for key, value in preset.items():
+                    params_copy[key] = value
                 
-                img_mask = np.maximum(img_mask, area)
-            
-            # Normalizza la maschera
-            if np.max(img_mask) > 0:
-                img_mask = img_mask / np.max(img_mask)
-            
-            # Sfuma i bordi
-            img_mask = cv2.GaussianBlur(img_mask, (kernel_size, kernel_size), 0)
-            
-            # Applica solo nelle aree disponibili
-            # (non a fuoco e controllando ghost)
-            available = (1.0 - weights_sum) * ghost_mask
-            final_mask = img_mask * available
-            
-            # Sfoca l'immagine con intensità variabile
-            blurred = cv2.GaussianBlur(
-                images[i].astype(np.float32), 
-                (max(3, int(31 * blur_strength) | 1), max(3, int(31 * blur_strength) | 1)), 
-                0
-            )
-            
-            # Aggiungi al risultato
-            result += final_mask[:, :, np.newaxis] * blurred
-            
-            # Aggiorna i pesi totali
-            weights_sum += final_mask
+                result = apply_effect(img, params_copy, seed)
+                output_path = os.path.join(output_dir, f"{base_name}_sample_{i+1}{ext}")
+                result.save(output_path, quality=95)
+                output_files.append(output_path)
+                print(f"Saved sample {i+1} to {output_path}")
     
-    # Riempi le aree rimanenti con l'immagine originale sfocata
-    remaining = 1.0 - weights_sum
-    if np.max(remaining) > 0:
-        original_blur = cv2.GaussianBlur(
-            images[0].astype(np.float32), 
-            (max(3, int(31 * blur_strength) | 1), max(3, int(31 * blur_strength) | 1)), 
-            0
-        )
-        result += remaining[:, :, np.newaxis] * original_blur
+    return output_files
+
+def apply_effect(img, params, seed):
+    """Apply the selective focus effect to a single image"""
+    random.seed(seed)
+    np.random.seed(seed)
     
-    # Aggiungi effetto di movimento
+    # Extract parameters
+    focus_ratio = params["focus_ratio"]  # 0.1-0.9
+    blur_strength = params["blur_strength"]  # 0.1-1.0
+    randomness = params["randomness"]  # 0.0-1.0
+    ghost_threshold = params["ghost_threshold"]  # 0.0-1.0
+    
+    # Create a blurred copy of the image
+    blur_radius = int(20 * blur_strength)
+    blurred = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    
+    # Create a mask for selective focus
+    width, height = img.size
+    mask = Image.new('L', (width, height), 0)
+    
+    # Center of the image
+    center_x, center_y = width // 2, height // 2
+    
+    # Radius of the focused area, modified with focus_ratio
+    focus_size = min(width, height) * (1.0 - focus_ratio * 0.8)
+    
+    # Add randomness to the focus center if requested
     if randomness > 0:
-        flow_x = np.zeros((h, w), dtype=np.float32)
-        flow_y = np.zeros((h, w), dtype=np.float32)
-        
-        # Aggiungi punti di distorsione
-        num_points = 3 + int(randomness * 7)
-        for _ in range(num_points):
-            cx = random.randint(0, w-1)
-            cy = random.randint(0, h-1)
-            intensity = random.uniform(5, 15) * blur_strength
-            radius = random.randint(w//10, w//3)
-            angle = random.uniform(0, 2 * np.pi)
-            dx = np.cos(angle)
-            dy = np.sin(angle)
-            
-            y, x = np.mgrid[:h, :w]
-            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
-            factor = intensity * np.exp(-(dist**2) / (2 * radius**2))
-            
-            flow_x += factor * dx
-            flow_y += factor * dy
-        
-        # Crea la mappa di distorsione
-        map_x = np.float32(np.array([[i for i in range(w)] for _ in range(h)]))
-        map_y = np.float32(np.array([[i] * w for i in range(h)]))
-        
-        map_x = map_x + flow_x
-        map_y = map_y + flow_y
-        
-        # Assicurati che i valori siano validi
-        map_x = np.clip(map_x, 0, w-1)
-        map_y = np.clip(map_y, 0, h-1)
-        
-        # Applica la distorsione
-        result = cv2.remap(result, map_x, map_y, cv2.INTER_LINEAR)
+        center_x += int(random.uniform(-width * 0.2, width * 0.2) * randomness)
+        center_y += int(random.uniform(-height * 0.2, height * 0.2) * randomness)
     
-    # Convertiti in uint8
-    result = np.clip(result, 0, 255).astype(np.uint8)
+    # Create focus mask with gradual transition
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((center_x - focus_size/2, center_y - focus_size/2,
+                  center_x + focus_size/2, center_y + focus_size/2), fill=255)
     
-    # Aggiungi il seed al nome del file se utilizzato
-    seed_suffix = f"_seed{seed}" if seed is not None else ""
-    variant_suffix = f"_{variant_name}" if variant_name else ""
+    # Blur the mask edges for smooth transition
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=focus_size/10))
     
-    # Salva il risultato
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    filename = f"selective_focus_fr{focus_ratio:.2f}_bs{blur_strength:.2f}_r{randomness:.2f}_g{ghost_threshold:.2f}{seed_suffix}{variant_suffix}_{timestamp}.jpg"
-    output_path = os.path.join(output_folder, filename)
-    cv2.imwrite(output_path, result)
+    # Apply randomness to the mask if requested
+    if randomness > 0:
+        mask_array = np.array(mask)
+        noise = np.random.normal(0, 30 * randomness, mask_array.shape)
+        mask_array = np.clip(mask_array + noise, 0, 255).astype(np.uint8)
+        mask = Image.fromarray(mask_array)
     
-    print(f"Immagine salvata in: {output_path}")
-    return output_path
+    # Combine the original image and the blurred one using the mask
+    result = Image.composite(img, blurred, mask)
+    
+    # Apply "ghost" effect if threshold > 0
+    if ghost_threshold > 0:
+        result = apply_ghost_effect(result, mask, ghost_threshold)
+    
+    return result
 
-def explore_mode(input_folder, output_folder, num_seeds=4):
-    """
-    Modalità esplorazione: genera diverse versioni con seed diversi e parametri standard
-    """
-    # Parametri standard
-    focus_ratio = 0.3
-    blur_strength = 0.7
-    randomness = 0.5
-    ghost_threshold = 0.5
+def apply_ghost_effect(img, mask, threshold):
+    """Apply a creative 'ghost' effect to out-of-focus areas"""
+    img = img.convert('RGBA')
+    width, height = img.size
+    result = img.copy()
+    pixels = result.load()
+    mask_pixels = mask.load()
     
-    # Genera seed casuali
-    seeds = [random.randint(1000, 9999) for _ in range(num_seeds)]
+    for y in range(height):
+        for x in range(width):
+            r, g, b, a = pixels[x, y]
+            mask_value = mask_pixels[x, y]
+            
+            # If we're outside the focus area based on threshold
+            if mask_value < 255 * threshold:
+                # Partial desaturation effect
+                gray = (r + g + b) // 3
+                factor = 0.7  # Effect intensity
+                
+                # Mix between original color and gray
+                r = int(r * (1 - factor) + gray * factor)
+                g = int(g * (1 - factor) + gray * factor)
+                b = int(b * (1 - factor) + gray * factor)
+                
+                # Add slight blue/cold tint for ethereal effect
+                b = min(255, int(b * 1.1))
+                
+                pixels[x, y] = (r, g, b, a)
     
-    print(f"Generazione di {num_seeds} varianti con seed diversi...")
-    for seed in seeds:
-        print(f"Elaborazione con seed {seed}...")
-        process_images(
-            input_folder, 
-            output_folder, 
-            focus_ratio, 
-            blur_strength, 
-            randomness, 
-            ghost_threshold, 
-            seed
-        )
-
-def sample_mode(input_folder, output_folder, seed):
-    """
-    Modalità sample: genera 6 varianti significative con lo stesso seed
-    """
-    if seed is None:
-        seed = random.randint(1000, 9999)
-        print(f"Seed casuale generato: {seed}")
-    
-    # Definizione delle 6 varianti
-    variants = [
-        # nome, focus_ratio, blur_strength, randomness, ghost_threshold
-        ("base", 0.5, 0.5, 0.5, 0.5),  # Valori medi
-        ("dettaglio", 0.7, 0.3, 0.5, 0.5),  # Alto focus, bassa sfocatura
-        ("sogno", 0.3, 0.7, 0.5, 0.5),  # Basso focus, alta sfocatura
-        ("movimento", 0.5, 0.5, 0.7, 0.5),  # Alta randomness
-        ("fantasma", 0.5, 0.5, 0.5, 0.7),  # Alto ghost threshold
-        ("contrasto", 0.7, 0.5, 0.5, 0.7)   # Alto focus, alto ghost
-    ]
-    
-    print(f"Generazione di 6 varianti significative con seed {seed}...")
-    for name, fr, bs, r, g in variants:
-        print(f"Elaborazione variante '{name}'...")
-        process_images(
-            input_folder,
-            output_folder,
-            fr, bs, r, g,
-            seed,
-            name
-        )
+    return result
 
 def main():
-    parser = argparse.ArgumentParser(description='Crea un\'immagine con messa a fuoco selettiva')
-    parser.add_argument('--input_dir', default='input', help='Directory contenente le immagini di input (default: "input")')
-    parser.add_argument('--output_dir', default='output', help='Directory dove salvare il risultato (default: "output")')
-    
-    # Aggiungi argomento per la modalità
-    parser.add_argument('--mode', '-m', choices=['standard', 'explore', 'refine', 'sample'], default='standard',
-                      help='Modalità: standard (singola immagine con parametri specificati), explore (genera 4 varianti con seed diversi), refine (usa un seed specifico), sample (genera 6 varianti con lo stesso seed)')
-    
-    parser.add_argument('--focus_ratio', type=float, default=0.3, help='Rapporto delle aree a fuoco (0.1-0.9)')
-    parser.add_argument('--blur_strength', type=float, default=0.7, help='Intensità della sfocatura (0.1-1.0)')
-    parser.add_argument('--randomness', type=float, default=0.5, help='Livello di casualità (0.0-1.0)')
-    parser.add_argument('--ghost_threshold', type=float, default=0.5, help='Soglia per l\'effetto ghosting (0.0-1.0). Più alto = più ghosting')
-    
-    # Aggiungi argomento per il seed
-    parser.add_argument('--seed', '-s', type=int, default=None, help='Seed per la generazione casuale (per modalità refine e sample)')
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Apply selective focus effect to images.")
+    parser.add_argument("--input_dir", required=True, help="Input directory containing images")
+    parser.add_argument("--output_dir", default="output", help="Output directory for processed images")
+    parser.add_argument("--mode", default="standard", choices=["standard", "explore", "sample", "refine"],
+                        help="Processing mode")
+    parser.add_argument("--seed", type=int, help="Random seed for reproducibility")
+    parser.add_argument("--focus_ratio", type=float, help="Focus ratio (0.1-0.9)")
+    parser.add_argument("--blur_strength", type=float, help="Blur strength (0.1-1.0)")
+    parser.add_argument("--randomness", type=float, help="Randomness (0.0-1.0)")
+    parser.add_argument("--ghost_threshold", type=float, help="Ghost threshold (0.0-1.0)")
     
     args = parser.parse_args()
     
-    # Esegui la modalità appropriata
-    if args.mode == 'explore':
-        print("Modalità esplorazione: generazione di 4 varianti con seed diversi")
-        explore_mode(args.input_dir, args.output_dir)
-    elif args.mode == 'sample':
-        print("Modalità sample: generazione di 6 varianti significative con lo stesso seed")
-        sample_mode(args.input_dir, args.output_dir, args.seed)
-    else:
-        print(f"Elaborazione immagini da: {args.input_dir}")
-        print(f"Parametri: focus_ratio={args.focus_ratio}, blur_strength={args.blur_strength}, randomness={args.randomness}, ghost_threshold={args.ghost_threshold}")
-        
-        if args.mode == 'refine' and args.seed is None:
-            print("ERRORE: La modalità refine richiede un seed specifico. Usa --seed per specificarlo.")
-            return
-        
-        process_images(
-            args.input_dir,
-            args.output_dir,
-            args.focus_ratio,
-            args.blur_strength,
-            args.randomness,
-            args.ghost_threshold,
-            args.seed if args.mode == 'refine' else None
-        )
+    # Extract parameters
+    params = {}
+    if args.focus_ratio is not None:
+        params["focus_ratio"] = args.focus_ratio
+    if args.blur_strength is not None:
+        params["blur_strength"] = args.blur_strength
+    if args.randomness is not None:
+        params["randomness"] = args.randomness
+    if args.ghost_threshold is not None:
+        params["ghost_threshold"] = args.ghost_threshold
+    
+    # Process images
+    start_time = time.time()
+    output_files = process_images(args.input_dir, args.output_dir, args.mode, args.seed, **params)
+    elapsed_time = time.time() - start_time
+    
+    print(f"Processing completed in {elapsed_time:.2f} seconds.")
+    print(f"Generated {len(output_files)} output images in {args.output_dir}")
 
 if __name__ == "__main__":
     main()
