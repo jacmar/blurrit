@@ -9,6 +9,11 @@ import base64
 import traceback
 from datetime import datetime
 
+# Carica CSS personalizzato
+local_css_file = os.path.join(os.path.dirname(__file__), "style.css")
+if os.path.exists(local_css_file):
+    with open(local_css_file) as f:
+        st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 # Set page configuration
 st.set_page_config(
     page_title="Selective Focus - Generatore di Effetti",
