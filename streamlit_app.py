@@ -2,7 +2,7 @@ import streamlit as st
 import os
 import random
 import numpy as np
-from PIL import Image, ImageFilter, ImageDraw, ImageChops, ImageEnhance
+from PIL import Image, ImageFilter, ImageDraw, ImageEnhance, ImageChops
 import io
 import base64
 from datetime import datetime
@@ -14,185 +14,11 @@ st.set_page_config(
     layout="wide"
 )
 
-# Funzioni di utilità per il processing delle immagini
-def apply_focus_mask(img, center_x, center_y, focus_size, transition_size):
-    """Crea e applica una maschera di focus con centro e dimensioni specificate"""
-    width, height = img.size
-    mask = Image.new('L', (width, height), 0)
-    draw = ImageDraw.Draw(mask)
-    
-    # Disegna un'ellisse piena come area di focus
-    draw.ellipse(
-        (center_x - focus_size/2, center_y - focus_size/2,
-         center_x + focus_size/2, center_y + focus_size/2),
-        fill=255
-    )
-    
-    # Sfuma i bordi della maschera per una transizione graduale
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=transition_size))
-    
-    return mask
-
-def add_noise_to_mask(mask, intensity=0.5):
-    """Aggiunge rumore casuale alla maschera per un effetto più naturale"""
-    if intensity <= 0:
-        return mask
-        
-    mask_array = np.array(mask)
-    noise = np.random.normal(0, 25 * intensity, mask_array.shape)
-    mask_array = np.clip(mask_array + noise, 0, 255).astype(np.uint8)
-    return Image.fromarray(mask_array)
-
-def apply_ghost_effect(img, mask, threshold=0.5, intensity=0.7):
-    """Applica un effetto 'ghost' creativo alle aree fuori fuoco"""
-    # Converti in RGBA per l'elaborazione
-    original_mode = img.mode
-    img = img.convert('RGBA')
-    
-    # Crea una copia per il risultato
-    result = img.copy()
-    
-    # Converti in array per velocizzare l'elaborazione
-    img_array = np.array(img)
-    mask_array = np.array(mask)
-    
-    # Area fuori fuoco in base alla threshold
-    out_of_focus = mask_array < (255 * threshold)
-    
-    # Calcola la versione desaturata (bianco e nero)
-    r, g, b, a = img_array[:, :, 0], img_array[:, :, 1], img_array[:, :, 2], img_array[:, :, 3]
-    gray = (r * 0.299 + g * 0.587 + b * 0.114).astype(np.uint8)
-    
-    # Effetto di desaturazione parziale
-    r_new = r.copy()
-    g_new = g.copy()
-    b_new = b.copy()
-    
-    # Applica l'effetto desaturato solo alle aree fuori fuoco
-    r_new[out_of_focus] = (r[out_of_focus] * (1 - intensity) + gray[out_of_focus] * intensity).astype(np.uint8)
-    g_new[out_of_focus] = (g[out_of_focus] * (1 - intensity) + gray[out_of_focus] * intensity).astype(np.uint8)
-    b_new[out_of_focus] = (b[out_of_focus] * (1 - intensity) + gray[out_of_focus] * intensity).astype(np.uint8)
-    
-    # Aggiungi una leggera tinta blu alle aree fuori fuoco per un effetto ethereo
-    b_new[out_of_focus] = np.minimum(255, (b_new[out_of_focus] * 1.05)).astype(np.uint8)
-    
-    # Ricostruisci l'immagine
-    result_array = np.stack([r_new, g_new, b_new, a], axis=2)
-    result = Image.fromarray(result_array)
-    
-    # Ripristina il formato originale se necessario
-    if original_mode == 'RGB':
-        result = result.convert('RGB')
-    
-    return result
-
-def stack_images(images, focus_ratio=0.3, blur_strength=0.7, randomness=0.5, ghost_threshold=0.5, seed=None):
-    """
-    Applica un effetto di stacking con focus selettivo su un insieme di immagini.
-    
-    Parameters:
-    images (list): Lista di oggetti PIL.Image
-    focus_ratio (float): Controlla la dimensione dell'area a fuoco (0.1-0.9)
-    blur_strength (float): Intensità della sfocatura (0.1-1.0)
-    randomness (float): Casualità nella posizione e forma dell'area a fuoco (0.0-1.0)
-    ghost_threshold (float): Soglia per l'effetto ghost (0.0-1.0)
-    seed (int, optional): Seed per la generazione casuale
-    
-    Returns:
-    PIL.Image: Immagine risultante con effetto di stacking
-    """
-    if not images or len(images) == 0:
-        return None
-    
-    # Se c'è una sola immagine, applica un effetto di focus selettivo semplice
-    if len(images) == 1:
-        return apply_single_image_effect(images[0], focus_ratio, blur_strength, randomness, ghost_threshold, seed)
-    
-    # Imposta il seed casuale
+def apply_multiple_focus_points(img, num_points=3, focus_ratio=0.3, blur_strength=0.7, randomness=0.5, seed=None):
+    """Applica più punti di focus casuali all'immagine"""
+    # Imposta seed per risultati riproducibili
     if seed is None:
-        seed = random.randint(1, 999999)
-    random.seed(seed)
-    np.random.seed(seed)
-    
-    # Assicurati che tutte le immagini abbiano la stessa dimensione (usa la prima come riferimento)
-    base_img = images[0]
-    width, height = base_img.size
-    
-    # Dimensione del focus e posizione centrale di base
-    focus_size = min(width, height) * (1.0 - focus_ratio * 0.8)
-    base_center_x, base_center_y = width // 2, height // 2
-    
-    # Aggiungi casualità alla posizione del focus
-    if randomness > 0:
-        base_center_x += int(random.uniform(-width * 0.15, width * 0.15) * randomness)
-        base_center_y += int(random.uniform(-height * 0.15, height * 0.15) * randomness)
-    
-    # Prepara l'immagine risultato
-    result = None
-    
-    # Per ogni immagine nello stack
-    for i, img in enumerate(images):
-        # Ridimensiona l'immagine se necessario
-        if img.size != (width, height):
-            img = img.resize((width, height), Image.LANCZOS)
-        
-        # Crea una copia dell'immagine per l'elaborazione
-        processed = img.copy()
-        
-        # Calcola il centro del focus per questa immagine con leggere variazioni
-        if i > 0 and randomness > 0:
-            center_x = base_center_x + int(random.uniform(-width * 0.05, width * 0.05) * randomness * i)
-            center_y = base_center_y + int(random.uniform(-height * 0.05, height * 0.05) * randomness * i)
-            curr_focus_size = focus_size * random.uniform(0.9, 1.1)
-        else:
-            center_x, center_y = base_center_x, base_center_y
-            curr_focus_size = focus_size
-        
-        # Transizione più ampia per le immagini successive dello stack
-        transition_size = max(curr_focus_size / 10, curr_focus_size / (10 - i * 0.5))
-        
-        # Crea la maschera di focus
-        mask = apply_focus_mask(img, center_x, center_y, curr_focus_size, transition_size)
-        
-        # Aggiungi rumore alla maschera se richiesto
-        if randomness > 0:
-            mask = add_noise_to_mask(mask, randomness * (1 + i * 0.1))
-        
-        # Applica sfocatura se non è nella zona di focus
-        blur_radius = int(max(1, 5 + 5 * blur_strength * (i + 1) / len(images)))
-        blurred = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-        
-        # Combina immagine originale e sfocata usando la maschera
-        processed = Image.composite(img, blurred, mask)
-        
-        # Applica effetto ghost se richiesto
-        if ghost_threshold > 0:
-            ghost_value = ghost_threshold * (1 - 0.1 * i / len(images))  # Varia leggermente per ogni immagine
-            processed = apply_ghost_effect(processed, mask, ghost_value)
-        
-        # Mescola con il risultato cumulativo
-        if result is None:
-            result = processed.convert('RGBA')
-        else:
-            # Varia l'opacità per ogni livello
-            alpha = 1.0 - (i / len(images)) * 0.4
-            processed = processed.convert('RGBA')
-            
-            # Crea una maschera per il blending
-            blend_mask = Image.new('L', (width, height), int(255 * alpha))
-            result = Image.composite(processed, result, blend_mask)
-    
-    # Converti il risultato finale in RGB
-    if result.mode == 'RGBA':
-        result = result.convert('RGB')
-    
-    return result
-
-def apply_single_image_effect(img, focus_ratio=0.3, blur_strength=0.7, randomness=0.5, ghost_threshold=0.5, seed=None):
-    """Applica un effetto di focus selettivo a una singola immagine"""
-    # Imposta il seed casuale
-    if seed is None:
-        seed = random.randint(1, 999999)
+        seed = random.randint(1, 9999)
     random.seed(seed)
     np.random.seed(seed)
     
@@ -202,33 +28,107 @@ def apply_single_image_effect(img, focus_ratio=0.3, blur_strength=0.7, randomnes
     
     width, height = img.size
     
-    # Calcola la posizione del focus con casualità
-    center_x, center_y = width // 2, height // 2
-    focus_size = min(width, height) * (1.0 - focus_ratio * 0.8)
+    # Crea una maschera combinata
+    combined_mask = Image.new('L', (width, height), 0)
     
-    # Aggiungi casualità alla posizione
-    if randomness > 0:
-        center_x += int(random.uniform(-width * 0.2, width * 0.2) * randomness)
-        center_y += int(random.uniform(-height * 0.2, height * 0.2) * randomness)
-    
-    # Crea l'effetto di sfocatura
-    blur_radius = int(max(1, 10 * blur_strength))
+    # Crea una versione sfocata dell'immagine
+    blur_radius = int(max(1, 15 * blur_strength))
     blurred = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
     
-    # Crea la maschera di focus
-    transition_size = max(1, focus_size / 10)
-    mask = apply_focus_mask(img, center_x, center_y, focus_size, transition_size)
+    # Crea diversi punti di focus casuali
+    for i in range(num_points):
+        # Determina posizione casuale del focus che NON sia al centro
+        quadrant = random.randint(0, 3)  # 0=alto-sx, 1=alto-dx, 2=basso-sx, 3=basso-dx
+        
+        if quadrant == 0:  # Alto-sinistro
+            center_x = random.randint(int(width * 0.1), int(width * 0.4))
+            center_y = random.randint(int(height * 0.1), int(height * 0.4))
+        elif quadrant == 1:  # Alto-destro
+            center_x = random.randint(int(width * 0.6), int(width * 0.9))
+            center_y = random.randint(int(height * 0.1), int(height * 0.4))
+        elif quadrant == 2:  # Basso-sinistro
+            center_x = random.randint(int(width * 0.1), int(width * 0.4))
+            center_y = random.randint(int(height * 0.6), int(height * 0.9))
+        else:  # Basso-destro
+            center_x = random.randint(int(width * 0.6), int(width * 0.9))
+            center_y = random.randint(int(height * 0.6), int(height * 0.9))
+        
+        # Aggiungi casualità aggiuntiva basata sul parametro randomness
+        if randomness > 0:
+            center_x += int(random.uniform(-width * 0.15, width * 0.15) * randomness)
+            center_y += int(random.uniform(-height * 0.15, height * 0.15) * randomness)
+        
+        # Limita le coordinate all'interno dell'immagine
+        center_x = max(0, min(width-1, center_x))
+        center_y = max(0, min(height-1, center_y))
+        
+        # Dimensione del punto di focus
+        # Varia la dimensione in base al parametro focus_ratio (più piccolo per valori più alti)
+        focus_size = min(width, height) * (0.2 - focus_ratio * 0.1) * random.uniform(0.8, 1.2)
+        
+        # Crea una maschera per questo punto di focus
+        point_mask = Image.new('L', (width, height), 0)
+        draw = ImageDraw.Draw(point_mask)
+        
+        # Disegna un'ellisse
+        draw.ellipse(
+            (center_x - focus_size/2, center_y - focus_size/2,
+             center_x + focus_size/2, center_y + focus_size/2),
+            fill=255
+        )
+        
+        # Sfuma i bordi per una transizione naturale
+        transition_size = max(1, focus_size / 4)
+        point_mask = point_mask.filter(ImageFilter.GaussianBlur(radius=transition_size))
+        
+        # Aggiungi rumore casuale alla maschera
+        if randomness > 0:
+            mask_array = np.array(point_mask)
+            noise = np.random.normal(0, 20 * randomness, mask_array.shape)
+            mask_array = np.clip(mask_array + noise, 0, 255).astype(np.uint8)
+            point_mask = Image.fromarray(mask_array)
+        
+        # Combina con la maschera globale (usa il massimo per ogni pixel)
+        combined_array = np.maximum(np.array(combined_mask), np.array(point_mask))
+        combined_mask = Image.fromarray(combined_array)
     
-    # Aggiungi rumore alla maschera
-    if randomness > 0:
-        mask = add_noise_to_mask(mask, randomness)
-    
-    # Combina l'immagine originale e quella sfocata
-    result = Image.composite(img, blurred, mask)
+    # Combina le immagini originale e sfocata usando la maschera combinata
+    result = Image.composite(img, blurred, combined_mask)
     
     # Applica l'effetto ghost
-    if ghost_threshold > 0:
-        result = apply_ghost_effect(result, mask, ghost_threshold)
+    return apply_ghost_effect(img, blurred, combined_mask, 0.5), seed
+
+def apply_ghost_effect(orig_img, blurred_img, mask, threshold=0.5):
+    """
+    Applica un effetto ghost più naturale: 
+    - Aree a fuoco: Colori originali
+    - Aree sfocate: Versione desaturata/b&w con leggera sfocatura
+    """
+    # Assicurati che le immagini siano in RGB
+    orig_img = orig_img.convert('RGB')
+    blurred_img = blurred_img.convert('RGB')
+    
+    # Crea una versione B&W dell'immagine sfocata
+    bw_blurred = blurred_img.convert('L').convert('RGB')
+    
+    # Converti la maschera in array numpy per un controllo più preciso
+    mask_array = np.array(mask)
+    
+    # Crea array booleano per le aree fuori fuoco (dove mask < threshold)
+    out_of_focus = mask_array < (255 * threshold)
+    
+    # Converti immagini in array numpy
+    orig_array = np.array(orig_img)
+    bw_array = np.array(bw_blurred)
+    
+    # Crea array risultato partendo dall'immagine originale
+    result_array = np.copy(orig_array)
+    
+    # Sostituisci le aree fuori fuoco con la versione B&W
+    result_array[out_of_focus] = bw_array[out_of_focus]
+    
+    # Crea l'immagine risultato
+    result = Image.fromarray(result_array)
     
     return result
 
@@ -242,22 +142,27 @@ def get_image_download_link(img, filename):
     href = f'<a href="data:file/jpg;base64,{img_str}" download="{filename}" class="download-button">📥 Scarica</a>'
     return href
 
+def create_filename(base_name, focus, blur, random, ghost, seed):
+    """Crea nome file con i parametri inclusi"""
+    # Formatta i parametri con 2 decimali
+    f_str = f"{focus:.2f}".replace('.', '_')
+    b_str = f"{blur:.2f}".replace('.', '_')
+    r_str = f"{random:.2f}".replace('.', '_')
+    g_str = f"{ghost:.2f}".replace('.', '_')
+    
+    # Formatta il seed come 4 cifre
+    seed_str = f"{seed % 10000:04d}"
+    
+    return f"{base_name}_f{f_str}_b{b_str}_r{r_str}_g{g_str}_s{seed_str}.jpg"
+
 # Main Streamlit app
 def main():
-    st.title("🔍 Selective Focus Stacking")
-    st.markdown("Crea effetti di messa a fuoco selettiva con stacking di immagini")
+    st.title("🔍 Selective Focus con Punti Multipli")
+    st.markdown("Applica effetti di messa a fuoco selettiva con punti casuali")
     st.markdown("---")
     
-    # Carica CSS personalizzato se esiste
-    css_file = os.path.join(os.path.dirname(__file__), "style.css")
-    if os.path.exists(css_file):
-        with open(css_file) as f:
-            st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
-    
-    # Layout a colonne
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
+    # Sidebar per i controlli
+    with st.sidebar:
         st.header("Controlli")
         
         # Upload immagini
@@ -265,13 +170,7 @@ def main():
             "Carica immagini",
             type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
-            help="Carica una o più immagini. Se carichi più immagini, verranno elaborate con stacking."
-        )
-        
-        # Modalità
-        mode = st.radio(
-            "Modalità:",
-            ["Standard", "Esplora varianti", "Campiona stili"]
+            help="Carica una o più immagini per elaborarle"
         )
         
         # Parametri
@@ -283,16 +182,16 @@ def main():
             max_value=0.9,
             value=0.3,
             step=0.05,
-            help="Controlla la dimensione dell'area a fuoco (valori più alti = area più piccola)"
+            help="Dimensione dell'area a fuoco (valori più alti = area più piccola)"
         )
         
         blur_strength = st.slider(
-            "Intensità sfocatura:",
+            "Sfocatura:",
             min_value=0.1,
             max_value=1.0,
             value=0.7,
             step=0.05,
-            help="Intensità dell'effetto sfocato nelle aree fuori fuoco"
+            help="Intensità della sfocatura nelle aree fuori fuoco"
         )
         
         randomness = st.slider(
@@ -301,19 +200,28 @@ def main():
             max_value=1.0,
             value=0.5,
             step=0.05,
-            help="Aggiunge casualità alla posizione e forma dell'area a fuoco"
+            help="Influenza sulla posizione e forma delle aree a fuoco"
         )
         
         ghost_threshold = st.slider(
             "Effetto Ghost:",
-            min_value=0.0,
-            max_value=1.0,
+            min_value=0.1,
+            max_value=0.9,
             value=0.5,
             step=0.05,
-            help="Controlla l'intensità dell'effetto bianco e nero nelle zone sfocate"
+            help="Soglia per l'effetto bianco e nero nelle aree sfocate"
         )
         
-        # Seed
+        num_focus_points = st.slider(
+            "Punti di focus:",
+            min_value=1,
+            max_value=5,
+            value=3,
+            step=1,
+            help="Numero di punti di focus casuali da generare"
+        )
+        
+        # Opzioni seed
         seed_option = st.radio(
             "Seed:",
             ["Casuale", "Specifico"]
@@ -322,11 +230,19 @@ def main():
         seed = None
         if seed_option == "Specifico":
             seed = st.number_input(
-                "Valore seed:",
+                "Valore seed (1-9999):",
                 min_value=1,
-                max_value=999999,
+                max_value=9999,
                 value=42
             )
+        
+        # Modalità
+        st.subheader("Modalità")
+        generate_variants = st.checkbox(
+            "Genera varianti",
+            value=False,
+            help="Genera 4 diverse varianti con seed diversi"
+        )
         
         # Pulsante elabora
         process_button = st.button(
@@ -335,190 +251,145 @@ def main():
             use_container_width=True
         )
     
-    with col2:
-        if uploaded_files:
-            # Mostra le immagini caricate
-            st.subheader("Immagini caricate")
+    # Area principale
+    if uploaded_files:
+        # Mostra anteprima immagini caricate
+        st.subheader("Immagini caricate")
+        
+        cols = st.columns(min(4, len(uploaded_files)))
+        images = []
+        filenames = []
+        
+        for i, file in enumerate(uploaded_files):
+            with cols[i % len(cols)]:
+                img = Image.open(file)
+                images.append(img)
+                filenames.append(os.path.splitext(file.name)[0])
+                st.image(img, width=150, caption=file.name)
+        
+        # Elabora immagini quando viene premuto il pulsante
+        if process_button:
+            st.markdown("---")
+            st.subheader("Risultati")
             
-            image_cols = st.columns(min(4, len(uploaded_files)))
-            images = []
+            # Progress bar
+            progress_bar = st.progress(0)
+            status = st.empty()
             
-            for i, file in enumerate(uploaded_files):
-                with image_cols[i % len(image_cols)]:
-                    img = Image.open(file)
-                    images.append(img)
-                    st.image(img, width=150, caption=file.name)
+            # Numero di varianti
+            num_variants = 4 if generate_variants else 1
             
-            # Elabora le immagini quando viene premuto il pulsante
-            if process_button:
-                st.markdown("---")
-                st.subheader("Risultati")
+            # Per ogni immagine caricata
+            for img_index, (img, base_name) in enumerate(zip(images, filenames)):
+                status.text(f"Elaborazione di {base_name}...")
                 
-                # Tracciamento del progresso
-                progress_bar = st.progress(0)
-                status = st.empty()
-                
-                # Elabora le immagini in base alla modalità
-                if mode == "Standard":
-                    status.text("Elaborazione con stacking...")
+                # Se genera varianti, creiamo una griglia
+                if generate_variants:
+                    st.markdown(f"**{base_name} - Varianti**")
                     
-                    # Usa tutte le immagini caricate per lo stacking
-                    result = stack_images(
-                        images,
+                    # Crea 2x2 griglia
+                    for row in range(2):
+                        cols = st.columns(2)
+                        for col in range(2):
+                            variant_idx = row * 2 + col
+                            variant_seed = seed + variant_idx if seed else random.randint(1, 9999)
+                            
+                            with cols[col]:
+                                # Applica l'effetto con punti di focus multipli
+                                result, used_seed = apply_multiple_focus_points(
+                                    img,
+                                    num_focus_points,
+                                    focus_ratio,
+                                    blur_strength,
+                                    randomness,
+                                    variant_seed
+                                )
+                                
+                                # Mostra risultato
+                                st.image(result, use_container_width=True)
+                                
+                                # Crea nome file con parametri
+                                filename = create_filename(
+                                    f"{base_name}_variant_{variant_idx+1}",
+                                    focus_ratio,
+                                    blur_strength,
+                                    randomness,
+                                    ghost_threshold,
+                                    used_seed
+                                )
+                                
+                                # Mostra informazioni e link download
+                                st.caption(f"Seed: {used_seed}")
+                                st.markdown(get_image_download_link(result, filename), unsafe_allow_html=True)
+                else:
+                    # Elabora una singola variante
+                    result, used_seed = apply_multiple_focus_points(
+                        img,
+                        num_focus_points,
+                        focus_ratio,
+                        blur_strength,
+                        randomness,
+                        seed
+                    )
+                    
+                    # Mostra il risultato
+                    st.markdown(f"**{base_name}**")
+                    st.image(result, use_container_width=True)
+                    
+                    # Crea nome file con parametri
+                    filename = create_filename(
+                        base_name,
                         focus_ratio,
                         blur_strength,
                         randomness,
                         ghost_threshold,
-                        seed
+                        used_seed
                     )
                     
-                    if result:
-                        # Mostra il risultato
-                        st.image(result, use_container_width=True)
-                        
-                        # Crea link per il download
-                        current_seed = seed if seed else random.randint(1, 999999)
-                        filename = f"stacked_focus_seed_{current_seed}.jpg"
-                        st.markdown(get_image_download_link(result, filename), unsafe_allow_html=True)
-                        
-                        # Mostra informazioni sul seed
-                        st.caption(f"Seed utilizzato: {current_seed}")
+                    # Mostra informazioni e link download
+                    st.caption(f"Parametri: Focus={focus_ratio}, Blur={blur_strength}, Random={randomness}, Ghost={ghost_threshold}, Seed={used_seed}")
+                    st.markdown(get_image_download_link(result, filename), unsafe_allow_html=True)
                 
-                elif mode == "Esplora varianti":
-                    # Genera 4 varianti con diversi seed
-                    variants = 4
-                    seeds = []
-                    results = []
-                    
-                    # Genera i seed se necessario
-                    base_seed = seed if seed else random.randint(1, 999999)
-                    for i in range(variants):
-                        seeds.append(base_seed + i if seed else random.randint(1, 999999))
-                    
-                    # Elabora ogni variante
-                    for i, current_seed in enumerate(seeds):
-                        status.text(f"Elaborazione variante {i+1}/{variants}...")
-                        
-                        result = stack_images(
-                            images,
-                            focus_ratio,
-                            blur_strength,
-                            randomness,
-                            ghost_threshold,
-                            current_seed
-                        )
-                        
-                        if result:
-                            results.append((result, current_seed))
-                        
-                        progress_bar.progress((i + 1) / variants)
-                    
-                    # Mostra i risultati in una griglia 2x2
-                    if results:
-                        for row in range(2):
-                            cols = st.columns(2)
-                            for col in range(2):
-                                idx = row * 2 + col
-                                if idx < len(results):
-                                    with cols[col]:
-                                        result, current_seed = results[idx]
-                                        st.image(result, use_container_width=True)
-                                        st.caption(f"Seed: {current_seed}")
-                                        
-                                        # Link per il download
-                                        filename = f"variant_{idx+1}_seed_{current_seed}.jpg"
-                                        st.markdown(get_image_download_link(result, filename), unsafe_allow_html=True)
+                # Aggiorna progress bar
+                progress_bar.progress((img_index + 1) / len(images))
                 
-                elif mode == "Campiona stili":
-                    # Crea 6 preset di stili diversi
-                    presets = [
-                        {"name": "Soft Focus", "focus": 0.2, "blur": 0.5, "random": 0.3, "ghost": 0.4},
-                        {"name": "Dramatic", "focus": 0.6, "blur": 0.9, "random": 0.4, "ghost": 0.6},
-                        {"name": "Wide Area", "focus": 0.1, "blur": 0.4, "random": 0.5, "ghost": 0.3},
-                        {"name": "Tight Focus", "focus": 0.7, "blur": 0.8, "random": 0.4, "ghost": 0.5},
-                        {"name": "Dreamy", "focus": 0.3, "blur": 0.6, "random": 0.7, "ghost": 0.3},
-                        {"name": "Creative", "focus": 0.4, "blur": 0.7, "random": 0.8, "ghost": 0.2}
-                    ]
-                    
-                    # Usa lo stesso seed per tutti gli stili
-                    current_seed = seed if seed else random.randint(1, 999999)
-                    results = []
-                    
-                    # Elabora ogni stile
-                    for i, preset in enumerate(presets):
-                        status.text(f"Elaborazione stile {i+1}/{len(presets)}...")
-                        
-                        result = stack_images(
-                            images,
-                            preset["focus"],
-                            preset["blur"],
-                            preset["random"],
-                            preset["ghost"],
-                            current_seed
-                        )
-                        
-                        if result:
-                            results.append((result, preset["name"]))
-                        
-                        progress_bar.progress((i + 1) / len(presets))
-                    
-                    # Mostra i risultati in una griglia 2x3
-                    if results:
-                        for row in range(2):
-                            cols = st.columns(3)
-                            for col in range(3):
-                                idx = row * 3 + col
-                                if idx < len(results):
-                                    with cols[col]:
-                                        result, style_name = results[idx]
-                                        st.image(result, use_container_width=True)
-                                        st.caption(f"{style_name} (Seed: {current_seed})")
-                                        
-                                        # Link per il download
-                                        filename = f"{style_name.lower().replace(' ', '_')}_seed_{current_seed}.jpg"
-                                        st.markdown(get_image_download_link(result, filename), unsafe_allow_html=True)
-                
-                # Pulisci i controlli di progresso
-                progress_bar.empty()
-                status.empty()
-                
-                # Messaggio finale
-                st.success("✅ Elaborazione completata!")
-        else:
-            # Messaggio quando non ci sono immagini caricate
-            st.info("👈 Carica una o più immagini per iniziare.")
+                # Linea di separazione tra immagini
+                if img_index < len(images) - 1:
+                    st.markdown("---")
             
-            with st.expander("Informazioni su Selective Focus Stacking"):
-                st.markdown("""
-                ## Cos'è Selective Focus Stacking?
-                
-                Questa applicazione ti permette di creare effetti artistici di messa a fuoco selettiva sulle tue immagini, 
-                combinando più immagini (stacking) per ottenere effetti creativi dove solo alcune parti dell'immagine 
-                sono a fuoco mentre il resto è sfocato con un effetto "ghost".
-                
-                ### Come funziona:
-                
-                1. **Con una singola immagine:** Verrà applicato un effetto di messa a fuoco selettiva con posizionamento casuale dell'area a fuoco
-                
-                2. **Con più immagini:** Le immagini verranno combinate (stacking) mantenendo a fuoco diverse aree in base ai parametri specificati
-                
-                ### Modalità disponibili:
-                
-                - **Standard:** Crea una singola immagine con i parametri specificati
-                - **Esplora varianti:** Genera 4 variazioni con diversi seed casuali
-                - **Campiona stili:** Applica 6 stili predefiniti alle tue immagini
-                
-                ### Parametri:
-                
-                - **Area a fuoco:** Controlla la dimensione dell'area a fuoco
-                - **Intensità sfocatura:** Quanto saranno sfocate le aree fuori fuoco
-                - **Casualità:** Aggiunge variazione alla posizione dell'area a fuoco
-                - **Effetto Ghost:** Controlla l'intensità dell'effetto in bianco e nero nelle zone sfocate
-                
-                ### Seed:
-                
-                Il seed è un valore numerico che garantisce risultati consistenti quando si usa lo stesso seed.
-                """)
+            # Pulisci status
+            status.empty()
+            progress_bar.empty()
+            
+            # Messaggio finale
+            st.success("✅ Elaborazione completata!")
+    else:
+        # Messaggio iniziale
+        st.info("👈 Carica una o più immagini per iniziare.")
+        
+        # Info sull'app
+        with st.expander("Informazioni sull'app"):
+            st.markdown("""
+            ## Selective Focus con Punti Multipli
+            
+            Questa app permette di creare effetti di messa a fuoco selettiva con punti di focus multipli
+            posizionati in modo casuale nell'immagine.
+            
+            ### Caratteristiche:
+            
+            - **Punti di focus multipli:** L'app genera automaticamente diversi punti di focus
+            - **Effetto ghost:** Le aree fuori fuoco vengono convertite in bianco e nero
+            - **Parametri regolabili:** Puoi controllare dimensione, sfocatura, casualità e intensità dell'effetto
+            - **Seed riproducibile:** Usando lo stesso seed otterrai risultati identici
+            
+            ### Parametri:
+            
+            - **Area a fuoco:** Controlla la dimensione delle aree a fuoco
+            - **Sfocatura:** Intensità della sfocatura nelle aree fuori fuoco
+            - **Casualità:** Influisce sulla posizione e forma delle aree a fuoco
+            - **Effetto Ghost:** Intensità dell'effetto bianco e nero nelle aree sfocate
+            - **Punti di focus:** Numero di punti di focus casuali da generare
+            """)
 
 if __name__ == "__main__":
     main()
