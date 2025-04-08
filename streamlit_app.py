@@ -7,10 +7,8 @@ from PIL import Image, ImageFilter, ImageDraw, ImageEnhance
 import io
 import base64
 from datetime import datetime
-from skimage.feature import peak_local_max
-from skimage.segmentation import watershed
-from skimage.measure import regionprops
 from scipy import ndimage
+from skimage.feature import peak_local_max
 
 # Set page configuration
 st.set_page_config(
@@ -22,6 +20,7 @@ st.set_page_config(
 def detect_interesting_regions(img, num_regions=5, randomness=0.5, min_size=0.01, max_size=0.1, seed=None):
     """
     Utilizza tecniche di computer vision per identificare regioni interessanti nell'immagine
+    Utilizza solo metodi compatibili con OpenCV standard
     """
     # Imposta seed per riproducibilità
     if seed is None:
@@ -45,36 +44,31 @@ def detect_interesting_regions(img, num_regions=5, randomness=0.5, min_size=0.01
     # 1. Rileva bordi utilizzando Canny
     edges = cv2.Canny(img_gray, 50, 150)
     
-    # 2. Calcola la mappa di saliency (regioni visivamente importanti)
-    saliency = cv2.saliency.StaticSaliencyFineGrained_create()
-    success, saliency_map = saliency.computeSaliency(img_cv)
-    if success:
-        saliency_map = (saliency_map * 255).astype("uint8")
-    else:
-        # Fallback in caso di errore
-        saliency_map = img_gray.copy()
+    # 2. Calcola contrasto locale (sostituto della mappa di saliency)
+    blur_small = cv2.GaussianBlur(img_gray, (5, 5), 0)
+    blur_large = cv2.GaussianBlur(img_gray, (21, 21), 0)
+    contrast_map = cv2.absdiff(blur_small, blur_large)
     
     # 3. Calcola la mappa di dettagli (variazioni locali)
-    blurred = cv2.GaussianBlur(img_gray, (21, 21), 0)
-    detail_map = cv2.absdiff(img_gray, blurred)
+    detail_map = cv2.Laplacian(img_gray, cv2.CV_64F)
+    detail_map = np.uint8(np.absolute(detail_map))
     
-    # 4. Combina le mappe (bordi, saliency, dettagli)
+    # 4. Combina le mappe (bordi, contrasto, dettagli)
     combined_map = cv2.addWeighted(
-        cv2.addWeighted(edges, 0.3, saliency_map, 0.3, 0),
+        cv2.addWeighted(edges, 0.3, contrast_map, 0.3, 0),
         0.5, detail_map, 0.5, 0
     )
     
-    # 5. Trova i massimi locali come punti di interesse
-    # Aggiungi un po' di rumore per aumentare la casualità se richiesto
+    # 5. Aggiungi un po' di rumore per aumentare la casualità se richiesto
     if randomness > 0:
         noise = np.random.normal(0, randomness * 30, combined_map.shape).astype(np.uint8)
         combined_map = cv2.add(combined_map, noise)
     
-    # Trova i massimi locali
+    # 6. Trova i massimi locali come punti di interesse
     distance = ndimage.distance_transform_edt(combined_map)
     coords = peak_local_max(distance, min_distance=30, num_peaks=min(20, num_regions*3))
     
-    # 6. Seleziona regioni casuali tra quelle trovate
+    # 7. Seleziona regioni casuali tra quelle trovate
     if len(coords) > 0:
         # Seleziona un sottoinsieme casuale di regioni
         indices = random.sample(range(len(coords)), min(num_regions, len(coords)))
@@ -228,14 +222,12 @@ def apply_ghost_effect(orig_img, blurred_img, mask, threshold=0.5):
         # Immagine a colori
         gray = cv2.cvtColor(blurred_array, cv2.COLOR_RGB2GRAY)
         # Aumenta contrasto
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced_gray = clahe.apply(gray)
+        gray_norm = cv2.normalize(gray, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
         # Espandi a 3 canali mantenendo grigio
-        bw_enhanced = cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2RGB)
+        bw_enhanced = cv2.cvtColor(gray_norm, cv2.COLOR_GRAY2RGB)
     else:
         # Immagine già in scala di grigi
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        bw_enhanced = clahe.apply(blurred_array)
+        bw_enhanced = cv2.normalize(blurred_array, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
     
     # Crea maschera binaria basata sulla threshold
     focus_binary = mask_array > (255 * threshold)
@@ -416,158 +408,165 @@ def main():
                 # Numero di varianti
                 num_variants = 4 if generate_variants else 1
                 
-                # Elabora ogni immagine
-                for img_index, (img, base_name) in enumerate(zip(images, filenames)):
-                    status.text(f"Elaborazione di {base_name}...")
-                    
-                    # Se genera varianti, mostra in griglia
-                    if generate_variants:
-                        st.markdown(f"**{base_name} - Varianti**")
+                try:
+                    # Elabora ogni immagine
+                    for img_index, (img, base_name) in enumerate(zip(images, filenames)):
+                        status.text(f"Elaborazione di {base_name}...")
                         
-                        # Crea griglia 2x2
-                        for row in range(2):
-                            cols = st.columns(2)
-                            for col in range(2):
-                                variant_idx = row * 2 + col
-                                variant_seed = seed + variant_idx if seed else random.randint(1, 9999)
+                        # Se genera varianti, mostra in griglia
+                        if generate_variants:
+                            st.markdown(f"**{base_name} - Varianti**")
+                            
+                            # Crea griglia 2x2
+                            for row in range(2):
+                                cols = st.columns(2)
+                                for col in range(2):
+                                    variant_idx = row * 2 + col
+                                    variant_seed = seed + variant_idx if seed else random.randint(1, 9999)
+                                    
+                                    with cols[col]:
+                                        # Applica effetto con rilevamento AI
+                                        result, used_seed, regions = apply_selective_focus(
+                                            img,
+                                            focus_ratio,
+                                            blur_strength,
+                                            randomness,
+                                            ghost_threshold,
+                                            num_regions,
+                                            variant_seed
+                                        )
+                                        
+                                        # Mostra risultato
+                                        st.image(result, use_container_width=True)
+                                        
+                                        # Se richiesto, mostra le regioni rilevate
+                                        if show_focus_regions:
+                                            # Crea visualizzazione delle regioni
+                                            regions_img = img.copy()
+                                            draw = ImageDraw.Draw(regions_img)
+                                            
+                                            for region in regions:
+                                                if region['type'] == 'ellipse':
+                                                    # Disegna ellisse
+                                                    x, y = region['center']
+                                                    a, b = region['size']
+                                                    # Disegna bordo ellisse in rosso
+                                                    bbox = (
+                                                        x - a, y - b,
+                                                        x + a, y + b
+                                                    )
+                                                    draw.ellipse(bbox, outline="red", width=3)
+                                                elif region['type'] == 'polygon':
+                                                    # Disegna poligono
+                                                    draw.polygon(region['points'], outline="red", width=3)
+                                                elif region['type'] == 'circle':
+                                                    # Disegna cerchio
+                                                    x, y = region['center']
+                                                    r = region['radius']
+                                                    bbox = (
+                                                        x - r, y - r,
+                                                        x + r, y + r
+                                                    )
+                                                    draw.ellipse(bbox, outline="red", width=3)
+                                            
+                                            # Mostra immagine con regioni evidenziate
+                                            st.image(regions_img, caption="Regioni rilevate", use_container_width=True)
+                                        
+                                        # Crea nome file con parametri
+                                        filename = create_filename(
+                                            f"{base_name}_variant_{variant_idx+1}",
+                                            focus_ratio,
+                                            blur_strength,
+                                            randomness,
+                                            ghost_threshold,
+                                            used_seed
+                                        )
+                                        
+                                        # Mostra info e link download
+                                        st.caption(f"Seed: {used_seed}")
+                                        st.markdown(get_image_download_link(result, filename), unsafe_allow_html=True)
+                        else:
+                            # Elabora singola variante
+                            result, used_seed, regions = apply_selective_focus(
+                                img,
+                                focus_ratio,
+                                blur_strength,
+                                randomness,
+                                ghost_threshold,
+                                num_regions,
+                                seed
+                            )
+                            
+                            # Mostra risultato
+                            st.markdown(f"**{base_name}**")
+                            st.image(result, use_container_width=True)
+                            
+                            # Se richiesto, mostra le regioni rilevate
+                            if show_focus_regions:
+                                # Crea visualizzazione delle regioni
+                                regions_img = img.copy()
+                                draw = ImageDraw.Draw(regions_img)
                                 
-                                with cols[col]:
-                                    # Applica effetto con rilevamento AI
-                                    result, used_seed, regions = apply_selective_focus(
-                                        img,
-                                        focus_ratio,
-                                        blur_strength,
-                                        randomness,
-                                        ghost_threshold,
-                                        num_regions,
-                                        variant_seed
-                                    )
-                                    
-                                    # Mostra risultato
-                                    st.image(result, use_container_width=True)
-                                    
-                                    # Se richiesto, mostra le regioni rilevate
-                                    if show_focus_regions:
-                                        # Crea visualizzazione delle regioni
-                                        regions_img = img.copy()
-                                        draw = ImageDraw.Draw(regions_img)
-                                        
-                                        for region in regions:
-                                            if region['type'] == 'ellipse':
-                                                # Disegna ellisse
-                                                x, y = region['center']
-                                                a, b = region['size']
-                                                # Disegna bordo ellisse in rosso
-                                                bbox = (
-                                                    x - a, y - b,
-                                                    x + a, y + b
-                                                )
-                                                draw.ellipse(bbox, outline="red", width=3)
-                                            elif region['type'] == 'polygon':
-                                                # Disegna poligono
-                                                draw.polygon(region['points'], outline="red", width=3)
-                                            elif region['type'] == 'circle':
-                                                # Disegna cerchio
-                                                x, y = region['center']
-                                                r = region['radius']
-                                                bbox = (
-                                                    x - r, y - r,
-                                                    x + r, y + r
-                                                )
-                                                draw.ellipse(bbox, outline="red", width=3)
-                                        
-                                        # Mostra immagine con regioni evidenziate
-                                        st.image(regions_img, caption="Regioni rilevate", use_container_width=True)
-                                    
-                                    # Crea nome file con parametri
-                                    filename = create_filename(
-                                        f"{base_name}_variant_{variant_idx+1}",
-                                        focus_ratio,
-                                        blur_strength,
-                                        randomness,
-                                        ghost_threshold,
-                                        used_seed
-                                    )
-                                    
-                                    # Mostra info e link download
-                                    st.caption(f"Seed: {used_seed}")
-                                    st.markdown(get_image_download_link(result, filename), unsafe_allow_html=True)
-                    else:
-                        # Elabora singola variante
-                        result, used_seed, regions = apply_selective_focus(
-                            img,
-                            focus_ratio,
-                            blur_strength,
-                            randomness,
-                            ghost_threshold,
-                            num_regions,
-                            seed
-                        )
-                        
-                        # Mostra risultato
-                        st.markdown(f"**{base_name}**")
-                        st.image(result, use_container_width=True)
-                        
-                        # Se richiesto, mostra le regioni rilevate
-                        if show_focus_regions:
-                            # Crea visualizzazione delle regioni
-                            regions_img = img.copy()
-                            draw = ImageDraw.Draw(regions_img)
+                                for region in regions:
+                                    if region['type'] == 'ellipse':
+                                        # Disegna ellisse
+                                        x, y = region['center']
+                                        a, b = region['size']
+                                        # Disegna bordo ellisse in rosso
+                                        bbox = (
+                                            x - a, y - b,
+                                            x + a, y + b
+                                        )
+                                        draw.ellipse(bbox, outline="red", width=3)
+                                    elif region['type'] == 'polygon':
+                                        # Disegna poligono
+                                        draw.polygon(region['points'], outline="red", width=3)
+                                    elif region['type'] == 'circle':
+                                        # Disegna cerchio
+                                        x, y = region['center']
+                                        r = region['radius']
+                                        bbox = (
+                                            x - r, y - r,
+                                            x + r, y + r
+                                        )
+                                        draw.ellipse(bbox, outline="red", width=3)
+                                
+                                # Mostra immagine con regioni evidenziate
+                                st.image(regions_img, caption="Regioni rilevate", use_container_width=True)
                             
-                            for region in regions:
-                                if region['type'] == 'ellipse':
-                                    # Disegna ellisse
-                                    x, y = region['center']
-                                    a, b = region['size']
-                                    # Disegna bordo ellisse in rosso
-                                    bbox = (
-                                        x - a, y - b,
-                                        x + a, y + b
-                                    )
-                                    draw.ellipse(bbox, outline="red", width=3)
-                                elif region['type'] == 'polygon':
-                                    # Disegna poligono
-                                    draw.polygon(region['points'], outline="red", width=3)
-                                elif region['type'] == 'circle':
-                                    # Disegna cerchio
-                                    x, y = region['center']
-                                    r = region['radius']
-                                    bbox = (
-                                        x - r, y - r,
-                                        x + r, y + r
-                                    )
-                                    draw.ellipse(bbox, outline="red", width=3)
+                            # Crea nome file con parametri
+                            filename = create_filename(
+                                base_name,
+                                focus_ratio,
+                                blur_strength,
+                                randomness,
+                                ghost_threshold,
+                                used_seed
+                            )
                             
-                            # Mostra immagine con regioni evidenziate
-                            st.image(regions_img, caption="Regioni rilevate", use_container_width=True)
+                            # Mostra info e link download
+                            st.caption(f"Parametri: Focus={focus_ratio}, Blur={blur_strength}, Random={randomness}, Ghost={ghost_threshold}, Seed={used_seed}")
+                            st.markdown(get_image_download_link(result, filename), unsafe_allow_html=True)
                         
-                        # Crea nome file con parametri
-                        filename = create_filename(
-                            base_name,
-                            focus_ratio,
-                            blur_strength,
-                            randomness,
-                            ghost_threshold,
-                            used_seed
-                        )
+                        # Aggiorna progress bar
+                        progress_bar.progress((img_index + 1) / len(images))
                         
-                        # Mostra info e link download
-                        st.caption(f"Parametri: Focus={focus_ratio}, Blur={blur_strength}, Random={randomness}, Ghost={ghost_threshold}, Seed={used_seed}")
-                        st.markdown(get_image_download_link(result, filename), unsafe_allow_html=True)
+                        # Linea di separazione tra immagini
+                        if img_index < len(images) - 1:
+                            st.markdown("---")
                     
-                    # Aggiorna progress bar
-                    progress_bar.progress((img_index + 1) / len(images))
+                    # Pulisci status
+                    status.empty()
+                    progress_bar.empty()
                     
-                    # Linea di separazione tra immagini
-                    if img_index < len(images) - 1:
-                        st.markdown("---")
-                
-                # Pulisci status
-                status.empty()
-                progress_bar.empty()
-                
-                # Messaggio finale
-                st.success("✅ Elaborazione completata!")
+                    # Messaggio finale
+                    st.success("✅ Elaborazione completata!")
+                    
+                except Exception as e:
+                    st.error(f"Si è verificato un errore durante l'elaborazione: {str(e)}")
+                    st.info("Prova a modificare i parametri o caricare un'immagine diversa.")
+                    progress_bar.empty()
+                    status.empty()
         else:
             # Messaggio iniziale
             st.info("👈 Carica una o più immagini per iniziare.")
