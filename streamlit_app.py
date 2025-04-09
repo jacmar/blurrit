@@ -19,7 +19,294 @@ st.set_page_config(
     layout="wide"
 )
 
-def simulate_depth_map(image, blur_range=(3, 25), randomness=0.5, ghosting=0.3, seed=None):
+# Definizione degli stili di focus
+FOCUS_STYLES = [
+    {"name": "organic", "label": "Organico", "description": "Forme irregolari con transizioni morbide"},
+    {"name": "dreamy", "label": "Sognante", "description": "Effetto onirico con sfocature ampie"},
+    {"name": "motion", "label": "Movimento", "description": "Simula movimento con sfocatura direzionale"},
+    {"name": "multi_point", "label": "Multi-punto", "description": "Numerosi piccoli punti a fuoco"},
+    {"name": "tilt_shift", "label": "Tilt-shift", "description": "Effetto miniatura con banda a fuoco"}
+]
+
+def apply_organic_focus(depth_map, focus_points, width, height, radius, randomness):
+    """Crea forme organiche con bordi molto irregolari e sfumati"""
+    focus_mask = np.zeros_like(depth_map, dtype=np.float32)
+    
+    for x, y in focus_points:
+        # Crea una forma molto più irregolare con molti vertici
+        num_vertices = random.randint(12, 20)
+        vertices = []
+        
+        for i in range(num_vertices):
+            angle = 2 * np.pi * i / num_vertices
+            # Raggio estremamente variabile
+            r = radius * random.uniform(0.4, 2.0)
+            vx = x + int(r * np.cos(angle))
+            vy = y + int(r * np.sin(angle))
+            
+            # Aggiungi "rumore" ai vertici per renderli ancora più irregolari
+            vx += int(radius * 0.4 * random.uniform(-1, 1))
+            vy += int(radius * 0.4 * random.uniform(-1, 1))
+            
+            # Limita ai bordi dell'immagine
+            vx = max(0, min(width-1, vx))
+            vy = max(0, min(height-1, vy))
+            vertices.append([vx, vy])
+        
+        # Disegna il poligono
+        temp_mask = np.zeros_like(depth_map, dtype=np.float32)
+        cv2.fillPoly(temp_mask, [np.array(vertices, dtype=np.int32)], 1.0)
+        
+        # Applica più passaggi di blur con kernel di dimensioni diverse
+        # per ottenere transizioni ancora più morbide e naturali
+        temp_mask = cv2.GaussianBlur(temp_mask, (41, 41), 0)
+        temp_mask = cv2.GaussianBlur(temp_mask, (81, 81), 0)
+        
+        # Aggiungi alla maschera principale
+        focus_mask = np.maximum(focus_mask, temp_mask)
+    
+    return focus_mask
+
+def apply_dreamy_focus(depth_map, focus_points, width, height, radius, randomness):
+    """Crea un effetto onirico con grandi aree sfumate e sovrapposte"""
+    focus_mask = np.zeros_like(depth_map, dtype=np.float32)
+    
+    # Seleziona solo alcuni punti di focus
+    num_points = max(1, min(len(focus_points), 3))
+    selected_points = random.sample(focus_points, num_points) if len(focus_points) > num_points else focus_points
+    
+    for x, y in selected_points:
+        # Raggio molto grande
+        large_radius = int(radius * 4.0 * random.uniform(0.9, 1.3))
+        
+        # Crea una maschera temporanea con gradiente radiale
+        temp_mask = np.zeros((height, width), dtype=np.float32)
+        
+        # Crea un gradiente basato sulla distanza
+        for y_coord in range(height):
+            for x_coord in range(width):
+                # Calcola distanza
+                dx = x_coord - x
+                dy = y_coord - y
+                
+                # Aggiungi distorsione alla distanza
+                if randomness > 0.3:
+                    distortion = randomness * 50.0
+                    dx += random.uniform(-distortion, distortion)
+                    dy += random.uniform(-distortion, distortion)
+                
+                distance = np.sqrt(dx**2 + dy**2)
+                
+                # Formula del gradiente con decadimento esponenziale più lento
+                gradient_value = np.exp(-distance**2 / (2 * (large_radius*1.2)**2))
+                temp_mask[y_coord, x_coord] = max(temp_mask[y_coord, x_coord], gradient_value)
+        
+        # Sfuma ulteriormente i bordi
+        temp_mask = cv2.GaussianBlur(temp_mask, (101, 101), 0)
+        
+        # Aggiungi alla maschera principale
+        focus_mask = np.maximum(focus_mask, temp_mask)
+    
+    return focus_mask
+
+def apply_motion_focus(depth_map, focus_points, width, height, radius, randomness):
+    """Crea un effetto tipo motion blur"""
+    focus_mask = np.zeros_like(depth_map, dtype=np.float32)
+    
+    if not focus_points:
+        return focus_mask
+    
+    # Punto di partenza (uno dei punti focali)
+    x, y = random.choice(focus_points)
+    
+    # Scegli una direzione casuale
+    angle = random.uniform(0, 2 * np.pi)
+    
+    # Lunghezza e larghezza del motion blur
+    length = int(min(width, height) * 0.4 * (0.7 + randomness))
+    width_blur = int(radius * random.uniform(0.5, 1.5))
+    
+    # Crea punti lungo la traiettoria
+    points = []
+    for t in range(-length//2, length//2, max(3, length//20)):
+        px = int(x + t * np.cos(angle))
+        py = int(y + t * np.sin(angle))
+        
+        # Aggiungi variazione perpendicolare alla direzione
+        if randomness > 0.3:
+            perp_angle = angle + np.pi/2
+            deviation = int(randomness * width_blur * random.uniform(-1, 1))
+            px += int(deviation * np.cos(perp_angle))
+            py += int(deviation * np.sin(perp_angle))
+        
+        # Assicurati che i punti siano all'interno dell'immagine
+        px = max(0, min(width-1, px))
+        py = max(0, min(height-1, py))
+        points.append((px, py))
+    
+    # Crea la maschera di motion blur
+    temp_mask = np.zeros_like(depth_map, dtype=np.float32)
+    
+    # Disegna una serie di cerchi sfumati lungo il percorso
+    for i, (px, py) in enumerate(points):
+        # Dimensione variabile lungo il percorso
+        local_width = width_blur * (1 - 0.5 * abs(i - len(points)//2) / (len(points)//2 or 1))
+        
+        # Disegna un cerchio
+        cv2.circle(temp_mask, (px, py), int(local_width), 1.0, -1)
+    
+    # Sfuma nella direzione del movimento
+    ksize = max(3, min(151, int(length / 3)))
+    # Assicura che sia dispari
+    ksize = ksize + 1 if ksize % 2 == 0 else ksize
+    
+    # Applica blur direzionale
+    temp_mask = cv2.GaussianBlur(temp_mask, (ksize, ksize), 0)
+    
+    # Aggiungi un po' di gaussian blur per ammorbidire i bordi
+    temp_mask = cv2.GaussianBlur(temp_mask, (41, 41), 0)
+    
+    # Aggiungi alla maschera principale
+    focus_mask = np.maximum(focus_mask, temp_mask)
+    
+    return focus_mask
+
+def apply_multi_point_focus(depth_map, focus_points, width, height, radius, randomness):
+    """Crea numerosi piccoli punti di focus sparsi"""
+    focus_mask = np.zeros_like(depth_map, dtype=np.float32)
+    
+    # Genera molti punti aggiuntivi
+    all_points = []
+    
+    # Prima aggiungi i punti di focus originali
+    for x, y in focus_points:
+        all_points.append((x, y))
+    
+    # Poi genera punti extra
+    num_extra_points = int(20 + randomness * 30)
+    
+    # Genera sia punti raggruppati intorno ai punti focali
+    # che alcuni completamente casuali
+    for _ in range(num_extra_points):
+        if random.random() < 0.7 and focus_points:  # 70% raggruppati
+            # Scegli un punto focale casuale
+            fx, fy = random.choice(focus_points)
+            
+            # Distanza dal punto focale
+            dist = radius * random.uniform(0.5, 3.0)
+            angle = random.uniform(0, 2 * np.pi)
+            
+            px = int(fx + dist * np.cos(angle))
+            py = int(fy + dist * np.sin(angle))
+        else:  # 30% completamente casuali
+            px = random.randint(0, width-1)
+            py = random.randint(0, height-1)
+        
+        # Limita ai bordi dell'immagine
+        px = max(0, min(width-1, px))
+        py = max(0, min(height-1, py))
+        
+        all_points.append((px, py))
+    
+    # Crea piccole aree di focus per ogni punto
+    for px, py in all_points:
+        # Raggio molto variabile
+        local_radius = int(radius * 0.2 * random.uniform(0.3, 1.8))
+        
+        temp_mask = np.zeros_like(depth_map, dtype=np.float32)
+        
+        # Usa forme variabili (cerchi o ellissi)
+        if random.random() < 0.7:  # Cerchio
+            cv2.circle(temp_mask, (px, py), local_radius, 1.0, -1)
+        else:  # Ellisse
+            a = local_radius * random.uniform(0.8, 1.2)
+            b = local_radius * random.uniform(0.8, 1.2)
+            angle = random.uniform(0, 360)
+            
+            cv2.ellipse(
+                temp_mask, 
+                (px, py), 
+                (int(a), int(b)), 
+                angle, 0, 360, 1.0, -1
+            )
+        
+        # Sfuma i bordi, con intensità variabile
+        blur_size = int(local_radius * 4) | 1  # Assicura che sia dispari
+        blur_size = max(3, min(blur_size, 41))
+        temp_mask = cv2.GaussianBlur(temp_mask, (blur_size, blur_size), 0)
+        
+        # Intensità variabile
+        if random.random() < 0.4:
+            intensity = random.uniform(0.3, 1.0)
+            temp_mask *= intensity
+        
+        # Aggiungi alla maschera principale
+        focus_mask = np.maximum(focus_mask, temp_mask)
+    
+    return focus_mask
+
+def apply_tilt_shift_focus(depth_map, focus_points, width, height, radius, randomness):
+    """Crea un effetto tilt-shift con una banda a fuoco"""
+    focus_mask = np.zeros_like(depth_map, dtype=np.float32)
+    
+    # Scegli un angolo per la banda
+    angle = random.uniform(-30, 30) if randomness > 0.3 else 0
+    
+    # Centro dell'immagine come punto di riferimento
+    center_x, center_y = width // 2, height // 2
+    
+    # Se ci sono punti focali, sposta il centro verso di essi
+    if focus_points:
+        avg_x = sum(x for x, _ in focus_points) / len(focus_points)
+        avg_y = sum(y for _, y in focus_points) / len(focus_points)
+        
+        # Interpolazione tra centro immagine e media punti focali
+        center_x = int(center_x * 0.3 + avg_x * 0.7)
+        center_y = int(center_y * 0.3 + avg_y * 0.7)
+    
+    # Larghezza della banda a fuoco
+    band_width = min(width, height) * (0.1 + randomness * 0.2)
+    
+    # Crea la maschera con una banda sfumata
+    for y in range(height):
+        for x in range(width):
+            # Coordinate relative al centro
+            rel_x = x - center_x
+            rel_y = y - center_y
+            
+            # Rotazione delle coordinate
+            angle_rad = angle * np.pi / 180
+            rot_x = rel_x * np.cos(angle_rad) - rel_y * np.sin(angle_rad)
+            rot_y = rel_x * np.sin(angle_rad) + rel_y * np.cos(angle_rad)
+            
+            # Distanza dalla linea centrale (usando solo y dopo la rotazione)
+            distance = abs(rot_y)
+            
+            # Valore di maschera basato sulla distanza
+            mask_value = np.exp(-distance**2 / (2 * (band_width/2)**2))
+            
+            # Aggiungi un po' di rumore se richiesto
+            if randomness > 0.5:
+                noise = randomness * 0.2 * random.uniform(-1, 1)
+                mask_value = max(0, min(1, mask_value + noise))
+            
+            focus_mask[y, x] = mask_value
+    
+    # Aggiungi ulteriore sfumatura
+    focus_mask = cv2.GaussianBlur(focus_mask, (81, 81), 0)
+    
+    return focus_mask
+
+# Dizionario di funzioni di stile
+FOCUS_STYLE_FUNCTIONS = {
+    "organic": apply_organic_focus,
+    "dreamy": apply_dreamy_focus,
+    "motion": apply_motion_focus,
+    "multi_point": apply_multi_point_focus,
+    "tilt_shift": apply_tilt_shift_focus
+}
+
+def simulate_depth_map(image, blur_range=(3, 25), randomness=0.5, ghosting=0.3, seed=None, focus_style="organic"):
     """
     Simula una depth map con tecniche di edge detection e gradiente
     Usa la depth map per creare un effetto di messa a fuoco computazionale
@@ -118,65 +405,17 @@ def simulate_depth_map(image, blur_range=(3, 25), randomness=0.5, ghosting=0.3, 
             if len(focus_points) >= num_points:
                 break
     
-    # 4. Crea una maschera di messa a fuoco basata sui punti selezionati
-    focus_mask = np.zeros_like(depth_map, dtype=np.float32)
+    # 4. Crea una maschera di messa a fuoco basata sui punti selezionati e lo stile scelto
     
-    for x, y in focus_points:
-        # Dimensione del punto di messa a fuoco variabile e naturale
-        depth_value = depth_map[y, x]
-        
-        # Calcola il raggio in base alla profondità e alla casualità
-        # Più piccolo per randomness alto (aree di focus più piccole)
-        base_radius = min(width, height) / (6 + randomness * 4)
-        radius = int(base_radius * random.uniform(0.8, 1.2))
-        
-        # Crea forme più organiche e meno circolari
-        if random.random() < 0.7:  # 70% delle volte utilizziamo forme più organiche
-            # Crea una forma irregolare
-            num_vertices = random.randint(5, 8)
-            vertices = []
-            
-            for i in range(num_vertices):
-                angle = 2 * np.pi * i / num_vertices
-                # Raggio variabile per ogni vertice
-                r = radius * random.uniform(0.7, 1.3)
-                vx = x + int(r * np.cos(angle))
-                vy = y + int(r * np.sin(angle))
-                
-                # Assicurati che i vertici siano all'interno dell'immagine
-                vx = max(0, min(width-1, vx))
-                vy = max(0, min(height-1, vy))
-                vertices.append([vx, vy])
-            
-            # Disegna il poligono
-            temp_mask = np.zeros_like(depth_map, dtype=np.float32)
-            cv2.fillPoly(temp_mask, [np.array(vertices, dtype=np.int32)], 1.0)
-            
-            # Sfuma i bordi
-            temp_mask = cv2.GaussianBlur(temp_mask, (21, 21), 0)
-            
-            # Aggiungi alla maschera principale
-            focus_mask = np.maximum(focus_mask, temp_mask)
-        else:
-            # Usa un'ellisse con proporzioni casuali
-            a = radius * random.uniform(0.8, 1.2)
-            b = radius * random.uniform(0.8, 1.2)
-            angle = random.uniform(0, 360)
-            
-            # Crea una maschera temporanea
-            temp_mask = np.zeros_like(depth_map, dtype=np.float32)
-            cv2.ellipse(
-                temp_mask, 
-                (int(x), int(y)), 
-                (int(a), int(b)), 
-                angle, 0, 360, 1.0, -1
-            )
-            
-            # Sfuma i bordi molto di più per evitare bordi visibili
-            temp_mask = cv2.GaussianBlur(temp_mask, (41, 41), 0)
-            
-            # Aggiungi alla maschera principale
-            focus_mask = np.maximum(focus_mask, temp_mask)
+    # Calcola il raggio di base per le aree di focus
+    radius = min(width, height) / (6 + randomness * 4)
+    
+    # Applica lo stile di focus scelto
+    if focus_style in FOCUS_STYLE_FUNCTIONS:
+        focus_mask = FOCUS_STYLE_FUNCTIONS[focus_style](depth_map, focus_points, width, height, radius, randomness)
+    else:
+        # Fallback allo stile organico
+        focus_mask = apply_organic_focus(depth_map, focus_points, width, height, radius, randomness)
     
     # 5. Applica l'effetto di messa a fuoco utilizzando la maschera
     
@@ -217,126 +456,6 @@ def simulate_depth_map(image, blur_range=(3, 25), randomness=0.5, ghosting=0.3, 
             # Calcola spostamento
             shift_x = int(ghosting * width * 0.01 * random.uniform(-1, 1))
             shift_y = int(ghosting * height * 0.01 * random.uniform(-1, 1))
-            
-            # Matrice di traslazione
-            M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
-            
-            # Applica la traslazione
-            shifted = cv2.warpAffine(img_array, M, (width, height))
-            
-            # Peso decrescente per ogni ghost successivo
-            weight = 1.0 / (i + 1) * 0.5
-            
-            ghost_images.append((shifted, weight))
-    
-    # Combina l'immagine originale e le versioni sfocate in base alla profondità e ai punti di focus
-    for y in range(height):
-        for x in range(width):
-            # Calcola il peso di messa a fuoco (combinazione di profondità e maschera di focus)
-            focus_weight = normalized_focus[y, x]
-            depth_weight = 1.0 - normalized_depth[y, x]
-            
-            # Combinazione ponderata
-            weight = focus_weight * 0.7 + depth_weight * 0.3
-            
-            # Scegli l'indice di sfocatura in base al peso
-            blur_idx = min(blur_steps - 1, int((1.0 - weight) * blur_steps))
-            
-            # Interpola tra l'originale e la versione sfocata appropriata
-            if len(img_array.shape) == 3:
-                # Immagine a colori
-                result[y, x] = weight * img_array[y, x] + (1.0 - weight) * blurred_images[blur_idx][y, x]
-            else:
-                # Immagine in scala di grigi
-                result[y, x] = weight * img_array[y, x] + (1.0 - weight) * blurred_images[blur_idx][y, x]
-    
-    # Applica l'effetto ghosting se richiesto
-    if ghosting > 0 and 'ghost_images' in locals():
-        for ghost_img, weight in ghost_images:
-            # Mescola il ghost con il risultato
-            result = result * (1.0 - weight) + ghost_img * weight
-    
-    # Converti il risultato in un'immagine PIL
-    result_img = Image.fromarray(result.astype(np.uint8))
-    
-    # Opzionalmente, restituisci anche la depth map per visualizzazione/debug
-    depth_map_img = Image.fromarray(depth_map)
-    focus_mask_img = Image.fromarray((focus_mask * 255).astype(np.uint8))
-    
-    return result_img, depth_map_img, focus_mask_img, seed
-
-def get_image_download_link(img, filename):
-    """Genera un link per scaricare un'immagine"""
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG", quality=95)
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-    href = f'<a href="data:file/jpg;base64,{img_str}" download="{filename}" style="display:inline-block; padding:0.5rem 1rem; background-color:#4285f4; color:white; text-decoration:none; border-radius:4px;">📥 Scarica</a>'
-    return href
-
-def get_zip_download_link(images, filenames, zip_filename="varianti.zip"):
-    """Genera un link per scaricare un file zip contenente più immagini"""
-    buffer = io.BytesIO()
-    
-    with zipfile.ZipFile(buffer, 'w') as zip_file:
-        for img, filename in zip(images, filenames):
-            img_buffer = io.BytesIO()
-            img.save(img_buffer, format="JPEG", quality=95)
-            zip_file.writestr(filename, img_buffer.getvalue())
-    
-    buffer.seek(0)
-    zip_str = base64.b64encode(buffer.getvalue()).decode()
-    
-    href = f'<a href="data:application/zip;base64,{zip_str}" download="{zip_filename}" style="display:inline-block; padding:0.5rem 1rem; background-color:#4CAF50; color:white; text-decoration:none; border-radius:4px;">📥 Scarica tutte le varianti (ZIP)</a>'
-    return href
-
-def create_filename(base_name, blur_min, blur_max, random, ghosting, seed):
-    """Crea nome file con i parametri inclusi"""
-    b_min = f"{blur_min:.1f}".replace('.', '_')
-    b_max = f"{blur_max:.1f}".replace('.', '_')
-    r_str = f"{random:.2f}".replace('.', '_')
-    g_str = f"{ghosting:.2f}".replace('.', '_')
-    seed_str = f"{seed % 10000:04d}"
-    return f"{base_name}_b{b_min}-{b_max}_r{r_str}_g{g_str}_s{seed_str}.jpg"
-
-def stack_images(images, blend_mode="average", randomness=0.5, seed=None):
-    """
-    Sovrappone più immagini con leggeri spostamenti casuali
-    per simulare leggere variazioni nella prospettiva
-    """
-    if not images or len(images) == 0:
-        return None
-    
-    # Se c'è una sola immagine, ritorna direttamente
-    if len(images) == 1:
-        return np.array(images[0])
-    
-    # Imposta seed per risultati riproducibili
-    if seed is None:
-        seed = random.randint(1, 9999)
-    random.seed(seed)
-    np.random.seed(seed)
-    
-    # Converti tutte le immagini in array numpy
-    np_images = [np.array(img) for img in images]
-    
-    # Usa la prima immagine come riferimento per le dimensioni
-    height, width = np_images[0].shape[:2]
-    channels = 3 if len(np_images[0].shape) == 3 else 1
-    
-    # Inizializza l'immagine risultato
-    if blend_mode == "average":
-        # Media ponderata
-        result = np.zeros((height, width, channels) if channels == 3 else (height, width), dtype=np.float32)
-        total_weight = 0
-        
-        for i, img in enumerate(np_images):
-            # Ridimensiona se necessario
-            if img.shape[:2] != (height, width):
-                img = cv2.resize(img, (width, height))
-            
-            # Applica una leggera traslazione casuale
-            shift_x = int(randomness * width * 0.05 * random.uniform(-1, 1))
-            shift_y = int(randomness * height * 0.05 * random.uniform(-1, 1))
             
             # Matrice di traslazione
             M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
@@ -398,7 +517,84 @@ def stack_images(images, blend_mode="average", randomness=0.5, seed=None):
             # Aggiorna il risultato con il valore minimo
             result = np.minimum(result, shifted.astype(np.float32))
     
-    return result.astype(np.uint8)
+    return result.astype(np.uint8)], [0, 1, shift_y]])
+            
+            # Applica la traslazione
+            shifted = cv2.warpAffine(img_array, M, (width, height))
+            
+            # Peso decrescente per ogni ghost successivo
+            weight = 1.0 / (i + 1) * 0.5
+            
+            ghost_images.append((shifted, weight))
+    
+    # Combina l'immagine originale e le versioni sfocate in base alla profondità e ai punti di focus
+    for y in range(height):
+        for x in range(width):
+            # Calcola il peso di messa a fuoco (combinazione di profondità e maschera di focus)
+            focus_weight = normalized_focus[y, x]
+            depth_weight = 1.0 - normalized_depth[y, x]
+            
+            # Combinazione ponderata
+            weight = focus_weight * 0.7 + depth_weight * 0.3
+            
+            # Scegli l'indice di sfocatura in base al peso
+            blur_idx = min(blur_steps - 1, int((1.0 - weight) * blur_steps))
+            
+            # Interpola tra l'originale e la versione sfocata appropriata
+            if len(img_array.shape) == 3:
+                # Immagine a colori
+                result[y, x] = weight * img_array[y, x] + (1.0 - weight) * blurred_images[blur_idx][y, x]
+            else:
+                # Immagine in scala di grigi
+                result[y, x] = weight * img_array[y, x] + (1.0 - weight) * blurred_images[blur_idx][y, x]
+    
+    # Applica l'effetto ghosting se richiesto
+    if ghosting > 0 and 'ghost_images' in locals():
+        for ghost_img, weight in ghost_images:
+            # Mescola il ghost con il risultato
+            result = result * (1.0 - weight) + ghost_img * weight
+    
+    # Converti il risultato in un'immagine PIL
+    result_img = Image.fromarray(result.astype(np.uint8))
+    
+    # Opzionalmente, restituisci anche la depth map per visualizzazione/debug
+    depth_map_img = Image.fromarray(depth_map)
+    focus_mask_img = Image.fromarray((focus_mask * 255).astype(np.uint8))
+    
+    return result_img, depth_map_img, focus_mask_img, seed, focus_style
+
+def get_image_download_link(img, filename):
+    """Genera un link per scaricare un'immagine"""
+    buffered = io.BytesIO()
+    img.save(buffered, format="JPEG", quality=95)
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    href = f'<a href="data:file/jpg;base64,{img_str}" download="{filename}" style="display:inline-block; padding:0.5rem 1rem; background-color:#4285f4; color:white; text-decoration:none; border-radius:4px;">📥 Scarica</a>'
+    return href
+
+def get_zip_download_link(images, filenames, zip_filename="varianti.zip"):
+    """Genera un link per scaricare un file zip contenente più immagini"""
+    buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(buffer, 'w') as zip_file:
+        for img, filename in zip(images, filenames):
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, format="JPEG", quality=95)
+            zip_file.writestr(filename, img_buffer.getvalue())
+    
+    buffer.seek(0)
+    zip_str = base64.b64encode(buffer.getvalue()).decode()
+    
+    href = f'<a href="data:application/zip;base64,{zip_str}" download="{zip_filename}" style="display:inline-block; padding:0.5rem 1rem; background-color:#4CAF50; color:white; text-decoration:none; border-radius:4px;">📥 Scarica tutte le varianti (ZIP)</a>'
+    return href
+
+def create_filename(base_name, focus_style, blur_min, blur_max, random, ghosting, seed):
+    """Crea nome file con i parametri inclusi e lo stile"""
+    b_min = f"{blur_min:.1f}".replace('.', '_')
+    b_max = f"{blur_max:.1f}".replace('.', '_')
+    r_str = f"{random:.2f}".replace('.', '_')
+    g_str = f"{ghosting:.2f}".replace('.', '_')
+    seed_str = f"{seed % 10000:04d}"
+    return f"{base_name}_{focus_style}_b{b_min}-{b_max}_r{r_str}_g{g_str}_s{seed_str}.jpg"
 
 # Layout principale
 st.title("📷 Computational Photography Effects")
@@ -410,6 +606,13 @@ col1, col2 = st.columns([1, 2])
 with col1:
     st.subheader("Controlli")
     
+    # Nome progetto
+    project_name = st.text_input(
+        "Nome del progetto:",
+        value="selective_focus",
+        help="Questo nome verrà usato come base per tutti i file generati"
+    )
+    
     # Upload immagini
     uploaded_files = st.file_uploader(
         "Carica immagini",
@@ -420,6 +623,19 @@ with col1:
     
     # Parametri
     st.subheader("Parametri")
+    
+    # Seleziona stile di focus
+    focus_style = st.selectbox(
+        "Stile di focus:",
+        options=[style["name"] for style in FOCUS_STYLES],
+        format_func=lambda x: next((style["label"] for style in FOCUS_STYLES if style["name"] == x), x),
+        help="Seleziona lo stile dell'effetto di messa a fuoco"
+    )
+    
+    # Mostra descrizione dello stile selezionato
+    selected_style = next((style for style in FOCUS_STYLES if style["name"] == focus_style), None)
+    if selected_style:
+        st.caption(selected_style["description"])
     
     min_blur = st.slider(
         "Sfocatura minima:",
@@ -540,12 +756,13 @@ with col2:
                         combined_img = images[0]
                     
                     # Applica l'effetto di depth map
-                    result, depth_map, focus_mask, used_seed = simulate_depth_map(
+                    result, depth_map, focus_mask, used_seed, used_style = simulate_depth_map(
                         combined_img,
                         (min_blur, max_blur),
                         randomness,
                         ghosting,
-                        seed
+                        seed,
+                        focus_style
                     )
                     
                     # Mostra risultato
@@ -554,6 +771,7 @@ with col2:
                     # Mostra i parametri utilizzati
                     st.info(f"""
                     **Parametri utilizzati:**
+                    - Stile: {next((style["label"] for style in FOCUS_STYLES if style["name"] == used_style), used_style)}
                     - Sfocatura: min={min_blur}, max={max_blur}
                     - Casualità: {randomness:.2f}
                     - Ghosting: {ghosting:.2f}
@@ -571,13 +789,9 @@ with col2:
                             st.image(focus_mask, use_container_width=True)
                     
                     # Crea nome file
-                    if len(uploaded_files) == 1:
-                        base_name = os.path.splitext(uploaded_files[0].name)[0]
-                    else:
-                        base_name = f"combined_{len(uploaded_files)}_images"
-                    
                     filename = create_filename(
-                        base_name,
+                        project_name,
+                        used_style,
                         min_blur,
                         max_blur,
                         randomness,
@@ -603,44 +817,46 @@ with col2:
                     else:
                         combined_img = images[0]
                     
-                    # Crea 4 varianti UNICHE con seed diversi
+                    # Crea 4 varianti UNICHE con seed e stili diversi
                     variant_images = []
                     variant_filenames = []
-                    
-                    # Base name per i file
-                    if len(uploaded_files) == 1:
-                        base_name = os.path.splitext(uploaded_files[0].name)[0]
-                    else:
-                        base_name = f"combined_{len(uploaded_files)}_images"
                     
                     # Crea 2x2 grid for visualization
                     variant_cols1 = st.columns(2)
                     variant_cols2 = st.columns(2)
                     
+                    # Usa diversi stili per le varianti
+                    style_names = [style["name"] for style in FOCUS_STYLES]
+                    
                     for i, col in enumerate([*variant_cols1, *variant_cols2]):
                         with col:
-                            # Ogni variante ha un seed diverso E parametri diversi
-                            variant_seed = (seed + i * 100) if seed else random.randint(1, 9999)
+                            # Ogni variante ha un seed diverso, parametri diversi, E uno stile diverso
+                            variant_seed = (seed + i * 159) if seed else random.randint(1, 9999)
                             
-                            # Varia anche i parametri
-                            variant_randomness = randomness * random.uniform(0.8, 1.2)
-                            variant_ghosting = ghosting * random.uniform(0.8, 1.2)
-                            variant_min_blur = min(min_blur + random.randint(-2, 2), min_blur)
-                            variant_max_blur = max(max_blur + random.randint(-5, 5), variant_min_blur + 5)
+                            # Scegli uno stile diverso per ogni variante
+                            variant_style = style_names[i % len(style_names)]
                             
-                            # Applica l'effetto
-                            result, _, _, used_seed = simulate_depth_map(
+                            # Varia MOLTO di più i parametri
+                            variant_randomness = min(1.0, max(0.1, randomness * random.uniform(0.6, 1.8)))
+                            variant_ghosting = min(1.0, max(0.0, ghosting * random.uniform(0.5, 2.0)))
+                            variant_min_blur = max(1, min_blur + random.randint(-4, 6))
+                            variant_max_blur = max(variant_min_blur + 10, max_blur + random.randint(-8, 12))
+                            
+                            # Applica l'effetto con stile diverso
+                            result, _, _, used_seed, used_style = simulate_depth_map(
                                 combined_img,
                                 (variant_min_blur, variant_max_blur),
                                 variant_randomness,
                                 variant_ghosting,
-                                variant_seed
+                                variant_seed,
+                                variant_style
                             )
                             
                             # Salva per download multiplo
                             variant_images.append(result)
                             variant_filename = create_filename(
-                                f"{base_name}_variant_{i+1}",
+                                f"{project_name}_variant_{i+1}",
+                                used_style,
                                 variant_min_blur,
                                 variant_max_blur,
                                 variant_randomness,
@@ -652,9 +868,13 @@ with col2:
                             # Mostra risultato
                             st.image(result, use_container_width=True)
                             
+                            # Ottieni l'etichetta dello stile per la visualizzazione
+                            style_label = next((style["label"] for style in FOCUS_STYLES if style["name"] == used_style), used_style)
+                            
                             # Mostra i parametri utilizzati
                             st.info(f"""
                             **Variante {i+1}:**
+                            - Stile: {style_label}
                             - Sfocatura: min={variant_min_blur}, max={variant_max_blur}
                             - Casualità: {variant_randomness:.2f}
                             - Ghosting: {variant_ghosting:.2f}
@@ -666,7 +886,7 @@ with col2:
                     
                     # Aggiungi un link per scaricare tutte le varianti in un file ZIP
                     st.markdown("---")
-                    st.markdown(get_zip_download_link(variant_images, variant_filenames, f"{base_name}_varianti.zip"), unsafe_allow_html=True)
+                    st.markdown(get_zip_download_link(variant_images, variant_filenames, f"{project_name}_varianti.zip"), unsafe_allow_html=True)
                     
                 except Exception as e:
                     st.error(f"Si è verificato un errore: {str(e)}")
@@ -694,16 +914,61 @@ with col2:
             
             5. **Stacking di immagini**: Se carichi più immagini, vengono combinate con leggere variazioni
             
+            ### Stili di focus disponibili:
+            
+            - **Organico**: Crea forme irregolari con transizioni molto morbide
+            - **Sognante**: Effetto onirico con ampie aree sfumate
+            - **Movimento**: Simula il movimento con sfocatura direzionale
+            - **Multi-punto**: Numerosi piccoli punti a fuoco sparsi
+            - **Tilt-shift**: Effetto miniatura con una banda a fuoco
+
             ### Suggerimenti:
             
             - Carica immagini con elementi interessanti distribuiti in diverse aree
-            - Prova diverse impostazioni di casualità per ottenere effetti variabili
+            - Prova diversi stili di focus per ottenere effetti completamente diversi
             - L'effetto ghosting simula la sovrapposizione di scatti leggermente diversi
             - Se carichi più immagini simili, l'algoritmo creerà un effetto di stacking
-            
-            ### Parametri:
-            
-            - **Sfocatura min/max**: Controlla l'intensità dell'effetto sfocatura
-            - **Casualità**: Aggiunge variazione nella selezione dei punti a fuoco
-            - **Ghosting**: Simula la sovrapposizione di immagini leggermente diverse
             """)
+
+def stack_images(images, blend_mode="average", randomness=0.5, seed=None):
+    """
+    Sovrappone più immagini con leggeri spostamenti casuali
+    per simulare leggere variazioni nella prospettiva
+    """
+    if not images or len(images) == 0:
+        return None
+    
+    # Se c'è una sola immagine, ritorna direttamente
+    if len(images) == 1:
+        return np.array(images[0])
+    
+    # Imposta seed per risultati riproducibili
+    if seed is None:
+        seed = random.randint(1, 9999)
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    # Converti tutte le immagini in array numpy
+    np_images = [np.array(img) for img in images]
+    
+    # Usa la prima immagine come riferimento per le dimensioni
+    height, width = np_images[0].shape[:2]
+    channels = 3 if len(np_images[0].shape) == 3 else 1
+    
+    # Inizializza l'immagine risultato
+    if blend_mode == "average":
+        # Media ponderata
+        result = np.zeros((height, width, channels) if channels == 3 else (height, width), dtype=np.float32)
+        total_weight = 0
+        
+        for i, img in enumerate(np_images):
+            # Ridimensiona se necessario
+            if img.shape[:2] != (height, width):
+                img = cv2.resize(img, (width, height))
+            
+            # Applica una leggera traslazione casuale
+            shift_x = int(randomness * width * 0.05 * random.uniform(-1, 1))
+            shift_y = int(randomness * height * 0.05 * random.uniform(-1, 1))
+            
+            # Matrice di traslazione
+            M = np.float32([[1, 0, shift_x
