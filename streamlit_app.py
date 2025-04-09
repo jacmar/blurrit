@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import streamlit as st
 import numpy as np
 import cv2
@@ -652,9 +655,6 @@ with col2:
                             # Mostra i parametri utilizzati
                             st.info(f"""
                             **Variante {i+1}:**
-# Mostra i parametri utilizzati
-                            st.info(f"""
-                            **Variante {i+1}:**
                             - Sfocatura: min={variant_min_blur}, max={variant_max_blur}
                             - Casualità: {variant_randomness:.2f}
                             - Ghosting: {variant_ghosting:.2f}
@@ -707,6 +707,3 @@ with col2:
             - **Casualità**: Aggiunge variazione nella selezione dei punti a fuoco
             - **Ghosting**: Simula la sovrapposizione di immagini leggermente diverse
             """)
-
-if __name__ == "__main__":
-    main()
