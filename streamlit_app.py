@@ -244,7 +244,6 @@ def apply_multi_point_focus(depth_map, focus_points, width, height, radius, rand
         focus_mask = np.maximum(focus_mask, temp_mask)
     
     return focus_mask
-
 def apply_tilt_shift_focus(depth_map, focus_points, width, height, radius, randomness):
     """Crea un effetto tilt-shift con una banda a fuoco"""
     focus_mask = np.zeros_like(depth_map, dtype=np.float32)
@@ -445,9 +444,9 @@ def simulate_depth_map(image, blur_range=(3, 25), randomness=0.5, ghosting=0.3, 
     normalized_focus = focus_mask
     
     # Applica effetto ghosting se richiesto (simula la sovrapposizione di più scatti leggermente diversi)
+    ghost_images = []
     if ghosting > 0:
         # Crea copie spostate dell'immagine originale
-        ghost_images = []
         
         # Numero di "ghost" basato sull'intensità del ghosting
         num_ghosts = int(2 + ghosting * 3)
@@ -456,6 +455,128 @@ def simulate_depth_map(image, blur_range=(3, 25), randomness=0.5, ghosting=0.3, 
             # Calcola spostamento
             shift_x = int(ghosting * width * 0.01 * random.uniform(-1, 1))
             shift_y = int(ghosting * height * 0.01 * random.uniform(-1, 1))
+            
+            # Matrice di traslazione
+            M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
+            
+            # Applica la traslazione
+            shifted = cv2.warpAffine(img_array, M, (width, height))
+            
+            # Peso decrescente per ogni ghost successivo
+            weight = 1.0 / (i + 1) * 0.5
+            
+            ghost_images.append((shifted, weight))
+    
+    # Combina l'immagine originale e le versioni sfocate in base alla profondità e ai punti di focus
+    for y in range(height):
+        for x in range(width):
+            # Calcola il peso di messa a fuoco (combinazione di profondità e maschera di focus)
+            focus_weight = normalized_focus[y, x]
+            depth_weight = 1.0 - normalized_depth[y, x]
+            
+            # Combinazione ponderata
+            weight = focus_weight * 0.7 + depth_weight * 0.3
+            
+            # Scegli l'indice di sfocatura in base al peso
+            blur_idx = min(blur_steps - 1, int((1.0 - weight) * blur_steps))
+            
+            # Interpola tra l'originale e la versione sfocata appropriata
+            if len(img_array.shape) == 3:
+                # Immagine a colori
+                result[y, x] = weight * img_array[y, x] + (1.0 - weight) * blurred_images[blur_idx][y, x]
+            else:
+                # Immagine in scala di grigi
+                result[y, x] = weight * img_array[y, x] + (1.0 - weight) * blurred_images[blur_idx][y, x]
+    
+    # Applica l'effetto ghosting se richiesto
+    if ghosting > 0 and ghost_images:
+        for ghost_img, weight in ghost_images:
+            # Mescola il ghost con il risultato
+            result = result * (1.0 - weight) + ghost_img * weight
+    
+    # Converti il risultato in un'immagine PIL
+    result_img = Image.fromarray(result.astype(np.uint8))
+    
+    # Opzionalmente, restituisci anche la depth map per visualizzazione/debug
+    depth_map_img = Image.fromarray(depth_map)
+    focus_mask_img = Image.fromarray((focus_mask * 255).astype(np.uint8))
+    
+    return result_img, depth_map_img, focus_mask_img, seed, focus_style
+
+def get_image_download_link(img, filename):
+    """Genera un link per scaricare un'immagine"""
+    buffered = io.BytesIO()
+    img.save(buffered, format="JPEG", quality=95)
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    href = f'<a href="data:file/jpg;base64,{img_str}" download="{filename}" style="display:inline-block; padding:0.5rem 1rem; background-color:#4285f4; color:white; text-decoration:none; border-radius:4px;">📥 Scarica</a>'
+    return href
+
+def get_zip_download_link(images, filenames, zip_filename="varianti.zip"):
+    """Genera un link per scaricare un file zip contenente più immagini"""
+    buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(buffer, 'w') as zip_file:
+        for img, filename in zip(images, filenames):
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, format="JPEG", quality=95)
+            zip_file.writestr(filename, img_buffer.getvalue())
+    
+    buffer.seek(0)
+    zip_str = base64.b64encode(buffer.getvalue()).decode()
+    
+    href = f'<a href="data:application/zip;base64,{zip_str}" download="{zip_filename}" style="display:inline-block; padding:0.5rem 1rem; background-color:#4CAF50; color:white; text-decoration:none; border-radius:4px;">📥 Scarica tutte le varianti (ZIP)</a>'
+    return href
+
+def create_filename(base_name, focus_style, blur_min, blur_max, random, ghosting, seed):
+    """Crea nome file con i parametri inclusi e lo stile"""
+    b_min = f"{blur_min:.1f}".replace('.', '_')
+    b_max = f"{blur_max:.1f}".replace('.', '_')
+    r_str = f"{random:.2f}".replace('.', '_')
+    g_str = f"{ghosting:.2f}".replace('.', '_')
+    seed_str = f"{seed % 10000:04d}"
+    return f"{base_name}_{focus_style}_b{b_min}-{b_max}_r{r_str}_g{g_str}_s{seed_str}.jpg"
+
+def stack_images(images, blend_mode="average", randomness=0.5, seed=None):
+    """
+    Sovrappone più immagini con leggeri spostamenti casuali
+    per simulare leggere variazioni nella prospettiva
+    """
+    if not images or len(images) == 0:
+        return None
+    
+    # Se c'è una sola immagine, ritorna direttamente
+    if len(images) == 1:
+        return np.array(images[0])
+    
+    # Imposta seed per risultati riproducibili
+    if seed is None:
+        seed = random.randint(1, 9999)
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    # Converti tutte le immagini in array numpy
+    np_images = [np.array(img) for img in images]
+    
+    # Usa la prima immagine come riferimento per le dimensioni
+    height, width = np_images[0].shape[:2]
+    channels = 3 if len(np_images[0].shape) == 3 else 1
+    
+    # Inizializza l'immagine risultato
+    if blend_mode == "average":
+        # Media ponderata
+        result = np.zeros((height, width, channels) if channels == 3 else (height, width), dtype=np.float32)
+        total_weight = 0
+        
+        for i, img in enumerate(np_images):
+            # Ridimensiona se necessario
+            if img.shape[:2]
+# Ridimensiona se necessario
+            if img.shape[:2] != (height, width):
+                img = cv2.resize(img, (width, height))
+            
+            # Applica una leggera traslazione casuale
+            shift_x = int(randomness * width * 0.05 * random.uniform(-1, 1))
+            shift_y = int(randomness * height * 0.05 * random.uniform(-1, 1))
             
             # Matrice di traslazione
             M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
@@ -517,84 +638,7 @@ def simulate_depth_map(image, blur_range=(3, 25), randomness=0.5, ghosting=0.3, 
             # Aggiorna il risultato con il valore minimo
             result = np.minimum(result, shifted.astype(np.float32))
     
-    return result.astype(np.uint8)], [0, 1, shift_y]])
-            
-            # Applica la traslazione
-            shifted = cv2.warpAffine(img_array, M, (width, height))
-            
-            # Peso decrescente per ogni ghost successivo
-            weight = 1.0 / (i + 1) * 0.5
-            
-            ghost_images.append((shifted, weight))
-    
-    # Combina l'immagine originale e le versioni sfocate in base alla profondità e ai punti di focus
-    for y in range(height):
-        for x in range(width):
-            # Calcola il peso di messa a fuoco (combinazione di profondità e maschera di focus)
-            focus_weight = normalized_focus[y, x]
-            depth_weight = 1.0 - normalized_depth[y, x]
-            
-            # Combinazione ponderata
-            weight = focus_weight * 0.7 + depth_weight * 0.3
-            
-            # Scegli l'indice di sfocatura in base al peso
-            blur_idx = min(blur_steps - 1, int((1.0 - weight) * blur_steps))
-            
-            # Interpola tra l'originale e la versione sfocata appropriata
-            if len(img_array.shape) == 3:
-                # Immagine a colori
-                result[y, x] = weight * img_array[y, x] + (1.0 - weight) * blurred_images[blur_idx][y, x]
-            else:
-                # Immagine in scala di grigi
-                result[y, x] = weight * img_array[y, x] + (1.0 - weight) * blurred_images[blur_idx][y, x]
-    
-    # Applica l'effetto ghosting se richiesto
-    if ghosting > 0 and 'ghost_images' in locals():
-        for ghost_img, weight in ghost_images:
-            # Mescola il ghost con il risultato
-            result = result * (1.0 - weight) + ghost_img * weight
-    
-    # Converti il risultato in un'immagine PIL
-    result_img = Image.fromarray(result.astype(np.uint8))
-    
-    # Opzionalmente, restituisci anche la depth map per visualizzazione/debug
-    depth_map_img = Image.fromarray(depth_map)
-    focus_mask_img = Image.fromarray((focus_mask * 255).astype(np.uint8))
-    
-    return result_img, depth_map_img, focus_mask_img, seed, focus_style
-
-def get_image_download_link(img, filename):
-    """Genera un link per scaricare un'immagine"""
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG", quality=95)
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-    href = f'<a href="data:file/jpg;base64,{img_str}" download="{filename}" style="display:inline-block; padding:0.5rem 1rem; background-color:#4285f4; color:white; text-decoration:none; border-radius:4px;">📥 Scarica</a>'
-    return href
-
-def get_zip_download_link(images, filenames, zip_filename="varianti.zip"):
-    """Genera un link per scaricare un file zip contenente più immagini"""
-    buffer = io.BytesIO()
-    
-    with zipfile.ZipFile(buffer, 'w') as zip_file:
-        for img, filename in zip(images, filenames):
-            img_buffer = io.BytesIO()
-            img.save(img_buffer, format="JPEG", quality=95)
-            zip_file.writestr(filename, img_buffer.getvalue())
-    
-    buffer.seek(0)
-    zip_str = base64.b64encode(buffer.getvalue()).decode()
-    
-    href = f'<a href="data:application/zip;base64,{zip_str}" download="{zip_filename}" style="display:inline-block; padding:0.5rem 1rem; background-color:#4CAF50; color:white; text-decoration:none; border-radius:4px;">📥 Scarica tutte le varianti (ZIP)</a>'
-    return href
-
-def create_filename(base_name, focus_style, blur_min, blur_max, random, ghosting, seed):
-    """Crea nome file con i parametri inclusi e lo stile"""
-    b_min = f"{blur_min:.1f}".replace('.', '_')
-    b_max = f"{blur_max:.1f}".replace('.', '_')
-    r_str = f"{random:.2f}".replace('.', '_')
-    g_str = f"{ghosting:.2f}".replace('.', '_')
-    seed_str = f"{seed % 10000:04d}"
-    return f"{base_name}_{focus_style}_b{b_min}-{b_max}_r{r_str}_g{g_str}_s{seed_str}.jpg"
+    return result.astype(np.uint8)
 
 # Layout principale
 st.title("📷 Computational Photography Effects")
@@ -681,7 +725,7 @@ with col1:
             help="Visualizza la depth map e la maschera di focus"
         )
         
-        if len(uploaded_files) > 1:
+        if uploaded_files and len(uploaded_files) > 1:
             blend_mode = st.selectbox(
                 "Modalità di stacking:",
                 ["average", "lighten", "darken"],
@@ -929,46 +973,3 @@ with col2:
             - L'effetto ghosting simula la sovrapposizione di scatti leggermente diversi
             - Se carichi più immagini simili, l'algoritmo creerà un effetto di stacking
             """)
-
-def stack_images(images, blend_mode="average", randomness=0.5, seed=None):
-    """
-    Sovrappone più immagini con leggeri spostamenti casuali
-    per simulare leggere variazioni nella prospettiva
-    """
-    if not images or len(images) == 0:
-        return None
-    
-    # Se c'è una sola immagine, ritorna direttamente
-    if len(images) == 1:
-        return np.array(images[0])
-    
-    # Imposta seed per risultati riproducibili
-    if seed is None:
-        seed = random.randint(1, 9999)
-    random.seed(seed)
-    np.random.seed(seed)
-    
-    # Converti tutte le immagini in array numpy
-    np_images = [np.array(img) for img in images]
-    
-    # Usa la prima immagine come riferimento per le dimensioni
-    height, width = np_images[0].shape[:2]
-    channels = 3 if len(np_images[0].shape) == 3 else 1
-    
-    # Inizializza l'immagine risultato
-    if blend_mode == "average":
-        # Media ponderata
-        result = np.zeros((height, width, channels) if channels == 3 else (height, width), dtype=np.float32)
-        total_weight = 0
-        
-        for i, img in enumerate(np_images):
-            # Ridimensiona se necessario
-            if img.shape[:2] != (height, width):
-                img = cv2.resize(img, (width, height))
-            
-            # Applica una leggera traslazione casuale
-            shift_x = int(randomness * width * 0.05 * random.uniform(-1, 1))
-            shift_y = int(randomness * height * 0.05 * random.uniform(-1, 1))
-            
-            # Matrice di traslazione
-            M = np.float32([[1, 0, shift_x
