@@ -570,7 +570,7 @@ def stack_images(images, blend_mode="average", randomness=0.5, seed=None):
         for i, img in enumerate(np_images):
             # Ridimensiona se necessario
             if img.shape[:2] != (height, width):
-    img = cv2.resize(img, (width, height))
+                img = cv2.resize(img, (width, height))
 # Ridimensiona se necessario
             if img.shape[:2] != (height, width):
                 img = cv2.resize(img, (width, height))
